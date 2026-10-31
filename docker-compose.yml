@@ -49,5 +49,67 @@ services:
     ports:
       - "5173:80"
 
+  zrok:
+    image: openziti/zrok
+    container_name: 9drive_zrok
+    restart: unless-stopped
+    user: root
+    environment:
+      - ZROK_ENABLE_TOKEN=${ZROK_ENABLE_TOKEN:-}
+      - ZROK_UNIQUE_NAME=${ZROK_UNIQUE_NAME:-}
+    volumes:
+      - zrok_data:/root/.zrok
+    depends_on:
+      - frontend
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        export HOME=/root
+        if [ -z "$$ZROK_ENABLE_TOKEN" ]; then
+          echo "================================================="
+          echo "Aguardando ZROK_ENABLE_TOKEN ser configurado..."
+          echo "================================================="
+          sleep infinity
+        fi
+        
+        if [ ! -f /root/.zrok/share_token ]; then
+          echo "================================================="
+          echo "Criando nova identidade e reservando URL..."
+          zrok disable > /dev/null 2>&1 || true
+          zrok enable $$ZROK_ENABLE_TOKEN || { echo "Falha crítica no zrok enable!"; sleep infinity; }
+          
+          if [ -n "$$ZROK_UNIQUE_NAME" ]; then
+            echo "Tentando reservar URL com nome personalizado: $$ZROK_UNIQUE_NAME"
+            zrok reserve public http://frontend:80 --unique-name $$ZROK_UNIQUE_NAME > /tmp/reserve.log 2>&1
+          else
+            echo "Reservando URL publica fixa aleatoria para o frontend..."
+            zrok reserve public http://frontend:80 > /tmp/reserve.log 2>&1
+          fi
+          
+          cat /tmp/reserve.log
+          TOKEN=$$(cat /tmp/reserve.log | grep -o "token is '[^']*'" | cut -d"'" -f2)
+          if [ -n "$$TOKEN" ]; then
+            echo $$TOKEN > /root/.zrok/share_token
+            echo "Sucesso! URL Reservada."
+          else
+            echo "Falha ao extrair token de reserva."
+            sleep infinity
+          fi
+        fi
+        
+        SHARE_TOKEN=$$(cat /root/.zrok/share_token)
+        echo "================================================="
+        echo "Iniciando túnel seguro Zrok na URL fixa..."
+        echo "Token do Share: $$SHARE_TOKEN"
+        echo "================================================="
+        zrok share reserved $$SHARE_TOKEN --headless || {
+          echo "ERRO: O zrok share falhou (ambiente corrompido ou token invalido)!"
+          echo "Deletando token para forcar recriacao automatica no proximo boot..."
+          rm -f /root/.zrok/share_token
+          sleep 5
+          exit 1
+        }
+
 volumes:
   mysql_data:
+  zrok_data:
