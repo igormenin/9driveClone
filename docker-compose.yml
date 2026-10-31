@@ -41,7 +41,7 @@ services:
     build:
       context: ./frontend
       args:
-        VITE_API_URL: ${VITE_API_URL:-http://localhost:4000}
+        VITE_API_URL: ${VITE_API_URL:-/api}
         VITE_RECAPTCHA_SITE_KEY: ${VITE_RECAPTCHA_SITE_KEY:-}
     restart: unless-stopped
     depends_on:
@@ -49,5 +49,38 @@ services:
     ports:
       - "5173:80"
 
+  zrok:
+    image: openziti/zrok:latest
+    restart: unless-stopped
+    depends_on:
+      - frontend
+    environment:
+      - HOME=/mnt
+      - ZROK_ENABLE_TOKEN=${ZROK_ENABLE_TOKEN:-}
+      - ZROK_UNIQUE_NAME=${ZROK_UNIQUE_NAME:-}
+    volumes:
+      - zrok_data:/mnt/.zrok
+    entrypoint:
+      - /bin/sh
+      - -c
+      - |
+        if [ -n "$$ZROK_ENABLE_TOKEN" ]; then
+          if [ ! -f /mnt/.zrok/environment.json ]; then
+            echo "Enabling zrok environment..."
+            zrok enable $$ZROK_ENABLE_TOKEN
+          fi
+          if [ -n "$$ZROK_UNIQUE_NAME" ]; then
+            echo "Starting reserved zrok share for $$ZROK_UNIQUE_NAME..."
+            zrok share reserved $$ZROK_UNIQUE_NAME --headless --override-endpoint http://frontend:80
+          else
+            echo "Starting public zrok share for http://frontend:80..."
+            zrok share public http://frontend:80 --headless
+          fi
+        else
+          echo "ZROK_ENABLE_TOKEN not configured. Zrok container idle."
+          sleep infinity
+        fi
+
 volumes:
   mysql_data:
+  zrok_data:

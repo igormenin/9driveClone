@@ -13,6 +13,7 @@ import { GetObjectCommand } from '@aws-sdk/client-s3'
 import { Readable } from 'node:stream'
 import { ZipArchive } from 'archiver'
 import { createAuditLog } from '../../utils/audit.js'
+import { getFrontendUrl } from '../../utils/url.js'
 
 
 
@@ -220,7 +221,8 @@ fileRouter.get('/shared-links', async (req: AuthRequest, res, next) => {
     })
     return res.json({
       shares: shares.filter((share) => share.file.status === 'active').map((share) => {
-        const url = share.token ? `${env.FRONTEND_URL}/public/files/${share.token}` : null
+        const baseUrl = getFrontendUrl(req)
+        const url = share.token ? `${baseUrl}/public/files/${share.token}` : null
         return {
           id: share.id,
           url,
@@ -295,7 +297,7 @@ fileRouter.post('/:id/share', async (req: AuthRequest, res, next) => {
       shareId = share.id
     }
 
-    return res.status(existingShare ? 200 : 201).json({ url: `${env.FRONTEND_URL}/public/files/${token}`, shareId })
+    return res.status(existingShare ? 200 : 201).json({ url: `${getFrontendUrl(req)}/public/files/${token}`, shareId })
   } catch (error) {
     return next(error)
   }
