@@ -177,6 +177,7 @@ Google connected accounts:
 - `GET /connected-accounts/google/connect`
 - `GET /connected-accounts/google/callback`
 - `GET /connected-accounts`
+- `PATCH /connected-accounts/:id` (`{ accessScope: 'app_folder' | 'full_drive' }` — toggles visibility of external Drive items without deleting any data)
 - `POST /connected-accounts/:id/sync-quota`
 - `DELETE /connected-accounts/:id`
 
@@ -227,7 +228,7 @@ Uploads:
 - File fields then match `filesMeta[*].fieldName`, e.g. `file-0`, `file-1`.
 - Backend selects a connected Drive account with enough available quota and streams each file directly to Google Drive.
 - Google Drive uploads are placed under the root Drive folder named `9drive`; virtual folders remain app/database-only.
-- `POST /files/sync-google` treats Google Drive folder `9drive` as source of truth for physical files: create missing MySQL file rows, update changed metadata, and mark missing Drive files as deleted.
+- `POST /files/sync-google` treats Google Drive folder `9drive` as source of truth for app-scoped files, and when a Google account has `accessScope = 'full_drive'`, also imports/reconciles owned external Google Drive folders and files (`isExternal = true`). Switching between `app_folder` and `full_drive` only hides or restores external items and never deletes any data.
 
 ## Docker
 

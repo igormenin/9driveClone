@@ -6,7 +6,8 @@ import { prisma } from '../../config/prisma.js'
 import { requireAuth, type AuthRequest } from '../../middleware/auth.middleware.js'
 import { decryptText, encryptText, hashToken, randomToken } from '../../utils/crypto.js'
 import { hashPassword } from '../../utils/password.js'
-import { createOAuthClient, syncGoogleQuota } from '../google/google.service.js'
+import { accessScopes, createOAuthClient, setAccountAccessScope, syncGoogleQuota } from '../google/google.service.js'
+import { createAuditLog } from '../../utils/audit.js'
 import { syncS3Quota, testS3Connection } from '../s3/s3.service.js'
 import { getFrontendUrl } from '../../utils/url.js'
 
@@ -295,6 +296,24 @@ connectedAccountRouter.post('/:id/sync-quota', requireAuth, async (req: AuthRequ
         trashBytes: quota.trashBytes?.toString() ?? null,
       },
     })
+  } catch (error) {
+    return next(error)
+  }
+})
+
+// Changes only visibility of external items; never deletes files/folders in MySQL or Google Drive.
+connectedAccountRouter.patch('/:id', requireAuth, async (req: AuthRequest, res, next) => {
+  try {
+    const body = z.object({ accessScope: z.enum(accessScopes) }).parse(req.body)
+    const accountId = String(req.params.id)
+    const account = await prisma.connectedAccount.findFirst({ where: { id: accountId, userId: req.user!.id, status: 'connected' } })
+    if (!account) return res.status(404).json({ code: 'ACCOUNT_NOT_FOUND', message: 'Connected account not found.' })
+    if (account.provider !== 'google_drive') return res.status(400).json({ code: 'SCOPE_NOT_SUPPORTED', message: 'Access scope is only available for Google Drive accounts.' })
+
+    const previousScope = account.accessScope
+    const result = await setAccountAccessScope(account.id, req.user!.id, body.accessScope)
+    await createAuditLog(req.user!.id, 'UPDATE_ACCOUNT_SCOPE', 'connected_account', account.id, { from: previousScope, to: body.accessScope, ...result })
+    return res.json(result)
   } catch (error) {
     return next(error)
   }

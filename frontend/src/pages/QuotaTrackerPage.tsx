@@ -7,7 +7,7 @@ import { apiFetch, formatBytes } from '@/lib/api'
 import { cn } from '@/lib/utils'
 
 type StorageSummary = { totalBytes: string; usedBytes: string; availableBytes: string }
-type ConnectedAccount = { id: string; email: string; displayName?: string | null; provider: string; status: string; storageAccount?: { totalBytes: string | null; usedBytes: string; availableBytes: string | null; lastSyncedAt: string | null } | null }
+type ConnectedAccount = { id: string; email: string; displayName?: string | null; provider: string; status: string; accessScope?: 'app_folder' | 'full_drive'; storageAccount?: { totalBytes: string | null; usedBytes: string; availableBytes: string | null; lastSyncedAt: string | null } | null }
 type RoutingMode = 'most_available' | 'round_robin' | 'priority'
 type RoutingPolicy = { mode: RoutingMode; priorityAccountIds: string[]; roundRobinCursor: number }
 
@@ -210,7 +210,7 @@ export function QuotaTrackerPage() {
               <div className="flex items-start justify-between gap-4">
                 <div className="flex items-center gap-3">
                   <div className="flex h-11 w-11 items-center justify-center rounded-xl bg-blue-600 text-white"><ProviderIcon provider={account.provider} /></div>
-                  <div><h2 className="font-extrabold">{providerLabel(account.provider)}</h2><p className="text-sm text-slate-500">{account.email}</p></div>
+                  <div><div className="flex items-center gap-2"><h2 className="font-extrabold">{providerLabel(account.provider)}</h2>{account.provider === 'google_drive' ? <span className="rounded-full bg-slate-100 dark:bg-slate-800 px-2 py-0.5 text-[10px] font-semibold text-slate-600 dark:text-slate-300">{account.accessScope === 'full_drive' ? 'Full Drive' : 'App Folder'}</span> : null}</div><p className="text-sm text-slate-500">{account.email}</p></div>
                 </div>
                 <div className="flex gap-2"><Button variant="outline" size="icon" onClick={() => sync(account.id)} disabled={syncingAccountId === account.id}><RefreshCw className={syncingAccountId === account.id ? 'h-5 w-5 animate-spin' : 'h-5 w-5'} /></Button></div>
               </div>

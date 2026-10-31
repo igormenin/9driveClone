@@ -3,7 +3,7 @@ import { google } from 'googleapis'
 import { z } from 'zod'
 import { prisma } from '../../config/prisma.js'
 import { requireAuth, type AuthRequest } from '../../middleware/auth.middleware.js'
-import { getAuthedGoogleClient, syncGoogleQuota, ensureGoogleAppFolder } from '../google/google.service.js'
+import { getAuthedGoogleClient, syncGoogleQuota, ensureGoogleAppFolder, getGoogleRootParentId, removeGoogleDriveItem } from '../google/google.service.js'
 import { createAuditLog } from '../../utils/audit.js'
 
 export const folderRouter = Router()
@@ -29,6 +29,7 @@ async function ensureProviderFolderIds(
   folders: Array<{ id: string; name: string; parentId: string | null; providerFolderId: string | null }>,
   userId: string
 ) {
+  // Only legacy app folders lack a Drive id; external (full_drive) folders always have one.
   const foldersWithoutId = folders.filter((f) => !f.providerFolderId)
   if (foldersWithoutId.length === 0) return
 
@@ -84,7 +85,7 @@ folderRouter.get('/', async (req: AuthRequest, res, next) => {
   try {
     const query = z.object({ parentId: z.string().nullable().optional(), all: z.string().optional() }).parse(req.query)
     const folders = await prisma.folder.findMany({
-      where: { userId: req.user!.id, deletedAt: null, ...(query.all === '1' ? {} : { parentId: query.parentId ?? null }) },
+      where: { userId: req.user!.id, deletedAt: null, hiddenAt: null, ...(query.all === '1' ? {} : { parentId: query.parentId ?? null }) },
       select: { id: true, name: true, color: true, iconUrl: true, parentId: true, providerFolderId: true, createdAt: true, updatedAt: true },
       orderBy: { updatedAt: 'desc' },
     })
@@ -99,7 +100,7 @@ folderRouter.get('/recent', async (req: AuthRequest, res, next) => {
   try {
     const limit = Math.min(Number(req.query.limit ?? 4), 4)
     const folders = await prisma.folder.findMany({
-      where: { userId: req.user!.id, deletedAt: null },
+      where: { userId: req.user!.id, deletedAt: null, hiddenAt: null },
       select: { id: true, name: true, color: true, iconUrl: true, parentId: true, providerFolderId: true, createdAt: true, updatedAt: true },
       orderBy: { updatedAt: 'desc' },
       take: limit,
@@ -117,13 +118,16 @@ folderRouter.post('/', async (req: AuthRequest, res, next) => {
     let parentFolder = null
     if (body.parentId) {
       parentFolder = await prisma.folder.findFirstOrThrow({
-        where: { id: body.parentId, userId: req.user!.id, deletedAt: null }
+        where: { id: body.parentId, userId: req.user!.id, deletedAt: null, hiddenAt: null }
       })
     }
 
+    // A folder created inside an external (full_drive) folder is external too and must live in the same Google account.
+    const isExternal = parentFolder?.isExternal ?? false
     const connectedAccount = await prisma.connectedAccount.findFirst({
-      where: { userId: req.user!.id, provider: 'google_drive', status: 'connected' }
+      where: { userId: req.user!.id, provider: 'google_drive', status: 'connected', ...(isExternal && parentFolder?.connectedAccountId ? { id: parentFolder.connectedAccountId } : {}) }
     })
+    if (isExternal && !connectedAccount) return res.status(400).json({ code: 'FOLDER_ACCOUNT_UNAVAILABLE', message: 'The Google account of the parent folder is not connected.' })
 
     let providerFolderId: string | null = null
     if (connectedAccount) {
@@ -131,7 +135,7 @@ folderRouter.post('/', async (req: AuthRequest, res, next) => {
         const auth = await getAuthedGoogleClient(connectedAccount)
         const drive = google.drive({ version: 'v3', auth })
 
-        let googleParentId = await ensureGoogleAppFolder(connectedAccount)
+        let googleParentId = await getGoogleRootParentId(connectedAccount, isExternal)
         if (parentFolder && parentFolder.providerFolderId) {
           googleParentId = parentFolder.providerFolderId
         }
@@ -158,7 +162,8 @@ folderRouter.post('/', async (req: AuthRequest, res, next) => {
         iconUrl: body.iconUrl ?? defaultFolderIconUrl,
         parentId: body.parentId ?? null,
         providerFolderId,
-        connectedAccountId: connectedAccount?.id ?? null
+        connectedAccountId: connectedAccount?.id ?? null,
+        isExternal
       },
       select: { id: true, name: true, color: true, iconUrl: true, parentId: true, providerFolderId: true, createdAt: true, updatedAt: true },
     })
@@ -176,13 +181,17 @@ folderRouter.patch('/:id', async (req: AuthRequest, res, next) => {
     if (body.parentId === folderId) return res.status(400).json({ code: 'FOLDER_INVALID_PARENT', message: 'Folder cannot be moved into itself.' })
 
     const folderRecord = await prisma.folder.findFirstOrThrow({
-      where: { id: folderId, userId: req.user!.id, deletedAt: null },
+      where: { id: folderId, userId: req.user!.id, deletedAt: null, hiddenAt: null },
       include: { connectedAccount: true }
     })
 
     if (body.parentId) {
-      await prisma.folder.findFirstOrThrow({ where: { id: body.parentId, userId: req.user!.id, deletedAt: null } })
-      const folders = await prisma.folder.findMany({ where: { userId: req.user!.id, deletedAt: null }, select: { id: true, parentId: true } })
+      const targetParent = await prisma.folder.findFirstOrThrow({ where: { id: body.parentId, userId: req.user!.id, deletedAt: null, hiddenAt: null } })
+      // External (full_drive) and app (9drive) folders cannot be mixed, otherwise switching scope could hide app items.
+      if (targetParent.isExternal !== folderRecord.isExternal || (folderRecord.isExternal && targetParent.connectedAccountId !== folderRecord.connectedAccountId)) {
+        return res.status(400).json({ code: 'CROSS_SCOPE_MOVE_NOT_SUPPORTED', message: 'Folders from the full Google Drive and from the 9drive app folder cannot be moved between each other.' })
+      }
+      const folders = await prisma.folder.findMany({ where: { userId: req.user!.id, deletedAt: null, hiddenAt: null }, select: { id: true, parentId: true } })
       const descendantIds = new Set<string>([folderId])
       let changed = true
       while (changed) {
@@ -217,7 +226,7 @@ folderRouter.patch('/:id', async (req: AuthRequest, res, next) => {
         const auth = await getAuthedGoogleClient(folderRecord.connectedAccount)
         const drive = google.drive({ version: 'v3', auth })
 
-        let newGoogleParentId = await ensureGoogleAppFolder(folderRecord.connectedAccount)
+        let newGoogleParentId = await getGoogleRootParentId(folderRecord.connectedAccount, folderRecord.isExternal)
         if (body.parentId) {
           const newParent = await prisma.folder.findFirst({ where: { id: body.parentId, userId: req.user!.id } })
           if (newParent?.providerFolderId) {
@@ -240,7 +249,7 @@ folderRouter.patch('/:id', async (req: AuthRequest, res, next) => {
     }
 
     const folder = await prisma.folder.updateMany({
-      where: { id: folderId, userId: req.user!.id, deletedAt: null },
+      where: { id: folderId, userId: req.user!.id, deletedAt: null, hiddenAt: null },
       data: { ...(body.name ? { name: body.name } : {}), ...(body.color ? { color: body.color } : {}), ...(body.iconUrl !== undefined ? { iconUrl: body.iconUrl } : {}), ...(body.parentId !== undefined ? { parentId: body.parentId } : {}) },
     })
     if (folder.count === 0) return res.status(404).json({ code: 'FOLDER_NOT_FOUND', message: 'Folder not found.' })
@@ -258,8 +267,8 @@ folderRouter.patch('/:id', async (req: AuthRequest, res, next) => {
 folderRouter.delete('/:id', async (req: AuthRequest, res, next) => {
   try {
     const rootId = String(req.params.id)
-    const root = await prisma.folder.findFirstOrThrow({ where: { id: rootId, userId: req.user!.id, deletedAt: null } })
-    const folders = await prisma.folder.findMany({ where: { userId: req.user!.id, deletedAt: null }, select: { id: true, parentId: true } })
+    const root = await prisma.folder.findFirstOrThrow({ where: { id: rootId, userId: req.user!.id, deletedAt: null, hiddenAt: null } })
+    const folders = await prisma.folder.findMany({ where: { userId: req.user!.id, deletedAt: null, hiddenAt: null }, select: { id: true, parentId: true } })
     const folderIds = new Set<string>([root.id])
     let changed = true
     while (changed) {
@@ -276,9 +285,8 @@ folderRouter.delete('/:id', async (req: AuthRequest, res, next) => {
     const syncedAccountIds = new Set<string>()
     for (const file of files) {
       try {
-        const auth = await getAuthedGoogleClient(file.connectedAccount)
-        const drive = google.drive({ version: 'v3', auth })
-        await drive.files.delete({ fileId: file.providerFileId })
+        // External (full_drive) files go to the Google trash; app files keep the permanent delete.
+        await removeGoogleDriveItem(file.connectedAccount, file.providerFileId, file.isExternal)
         syncedAccountIds.add(file.connectedAccountId)
       } catch {
         // Keep going so one failure does not block the whole deletion
@@ -290,9 +298,7 @@ folderRouter.delete('/:id', async (req: AuthRequest, res, next) => {
     for (const f of foldersToDelete) {
       if (f.providerFolderId && f.connectedAccount) {
         try {
-          const auth = await getAuthedGoogleClient(f.connectedAccount)
-          const drive = google.drive({ version: 'v3', auth })
-          await drive.files.delete({ fileId: f.providerFolderId })
+          await removeGoogleDriveItem(f.connectedAccount, f.providerFolderId, f.isExternal)
           if (f.connectedAccountId) syncedAccountIds.add(f.connectedAccountId)
         } catch {
           // ignore

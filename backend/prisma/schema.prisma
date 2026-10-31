@@ -147,6 +147,7 @@ model ConnectedAccount {
   tokenExpiresAt        DateTime?       @map("token_expires_at")
   scopes                Json
   status                String          @default("connected") @db.VarChar(32)
+  accessScope           String          @default("app_folder") @map("access_scope") @db.VarChar(32)
   lastError             String?         @map("last_error") @db.Text
   createdAt             DateTime        @default(now()) @map("created_at")
   updatedAt             DateTime        @updatedAt @map("updated_at")
@@ -215,6 +216,7 @@ model File {
   sizeBytes          BigInt           @map("size_bytes")
   checksum           String?          @db.VarChar(191)
   status             String           @default("active") @db.VarChar(32)
+  isExternal         Boolean          @default(false) @map("is_external")
   createdAt          DateTime         @default(now()) @map("created_at")
   updatedAt          DateTime         @updatedAt @map("updated_at")
   deletedAt          DateTime?        @map("deleted_at")
@@ -230,6 +232,7 @@ model File {
   @@index([connectedAccountId])
   @@index([folderId])
   @@index([providerFileId])
+  @@index([connectedAccountId, isExternal])
   @@map("files")
 }
 
@@ -278,6 +281,8 @@ model Folder {
   name               String            @db.VarChar(255)
   color              String            @default("text-blue-500") @db.VarChar(64)
   iconUrl            String?           @map("icon_url") @db.Text
+  isExternal         Boolean           @default(false) @map("is_external")
+  hiddenAt           DateTime?         @map("hidden_at")
   createdAt          DateTime          @default(now()) @map("created_at")
   updatedAt          DateTime          @updatedAt @map("updated_at")
   deletedAt          DateTime?         @map("deleted_at")
@@ -293,6 +298,7 @@ model Folder {
   @@index([userId, deletedAt, parentId, updatedAt])
   @@index([parentId])
   @@index([connectedAccountId])
+  @@index([connectedAccountId, isExternal])
   @@map("folders")
 }
 

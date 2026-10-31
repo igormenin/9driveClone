@@ -5,7 +5,7 @@ import { prisma } from '../../config/prisma.js'
 import { env } from '../../config/env.js'
 import { requireAuth, type AuthRequest } from '../../middleware/auth.middleware.js'
 import { hashToken, randomToken } from '../../utils/crypto.js'
-import { getAuthedGoogleClient, syncGoogleAppFolderFiles, syncGoogleQuota } from '../google/google.service.js'
+import { getAuthedGoogleClient, isFullDriveAccount, removeGoogleDriveItem, syncGoogleAccount, syncGoogleQuota } from '../google/google.service.js'
 import { deleteS3Object, syncS3Quota, createS3Client, getS3ConfigForAccount } from '../s3/s3.service.js'
 import { streamProviderFile } from './stream-file.js'
 import { googleDownloadExportMimeTypes, normalizeHeaders, withExtension } from './stream-google-file.js'
@@ -18,6 +18,17 @@ import { getFrontendUrl } from '../../utils/url.js'
 
 
 export const fileRouter = Router()
+
+/**
+ * External (full_drive) items and app-managed (9drive) items cannot be mixed in the same folder,
+ * otherwise switching access scope could hide app files. Root (null) is neutral.
+ */
+async function findCrossScopeMoveConflict(userId: string, files: Array<{ isExternal: boolean; connectedAccountId: string }>, folderId: string | null | undefined) {
+  if (!folderId) return null
+  const folder = await prisma.folder.findFirstOrThrow({ where: { id: folderId, userId, deletedAt: null, hiddenAt: null } })
+  const conflict = files.some((file) => file.isExternal !== folder.isExternal || (folder.isExternal && folder.connectedAccountId !== file.connectedAccountId))
+  return conflict ? { code: 'CROSS_SCOPE_MOVE_NOT_SUPPORTED', message: 'Files from the full Google Drive and from the 9drive app folder cannot be moved between each other.' } : null
+}
 
 fileRouter.get('/preview/:token', async (req, res, next) => {
   try {
@@ -96,7 +107,9 @@ const batchFileSchema = z.object({ fileIds: z.array(z.string().min(1)).min(1).ma
 fileRouter.patch('/batch', async (req: AuthRequest, res, next) => {
   try {
     const body = batchFileSchema.extend({ folderId: z.string().nullable().optional() }).parse(req.body)
-    if (body.folderId) await prisma.folder.findFirstOrThrow({ where: { id: body.folderId, userId: req.user!.id, deletedAt: null } })
+    const filesToMove = await prisma.file.findMany({ where: { id: { in: body.fileIds }, userId: req.user!.id, status: 'active' }, select: { isExternal: true, connectedAccountId: true } })
+    const conflict = await findCrossScopeMoveConflict(req.user!.id, filesToMove, body.folderId)
+    if (conflict) return res.status(400).json(conflict)
     const result = await prisma.file.updateMany({ where: { id: { in: body.fileIds }, userId: req.user!.id, status: 'active' }, data: { folderId: body.folderId ?? null } })
     await createAuditLog(req.user!.id, 'MOVE_FILES', 'file', undefined, { count: result.count, folderId: body.folderId })
     return res.json({ status: 'ok', moved: result.count })
@@ -146,11 +159,19 @@ fileRouter.get('/trash', async (req: AuthRequest, res, next) => {
 fileRouter.post('/batch/restore', async (req: AuthRequest, res, next) => {
   try {
     const body = batchFileSchema.parse(req.body)
-    const files = await prisma.file.findMany({ where: { id: { in: body.fileIds }, userId: req.user!.id, status: 'deleted' } })
-    const result = await prisma.file.updateMany({
-      where: { id: { in: body.fileIds }, userId: req.user!.id, status: 'deleted' },
+    const files = await prisma.file.findMany({ where: { id: { in: body.fileIds }, userId: req.user!.id, status: 'deleted' }, include: { connectedAccount: { select: { accessScope: true } } } })
+    // External files restored while their account is in app_folder mode stay hidden until full_drive is enabled again.
+    const hiddenIds = files.filter((file) => file.isExternal && !isFullDriveAccount(file.connectedAccount)).map((file) => file.id)
+    const activeIds = files.filter((file) => !hiddenIds.includes(file.id)).map((file) => file.id)
+    const activeResult = await prisma.file.updateMany({
+      where: { id: { in: activeIds }, userId: req.user!.id, status: 'deleted' },
       data: { status: 'active', deletedAt: null }
     })
+    const hiddenResult = await prisma.file.updateMany({
+      where: { id: { in: hiddenIds }, userId: req.user!.id, status: 'deleted' },
+      data: { status: 'hidden', deletedAt: null }
+    })
+    const result = { count: activeResult.count + hiddenResult.count }
     for (const f of files) {
       await createAuditLog(req.user!.id, 'RESTORE_FILE', 'file', f.id, { name: f.name })
     }
@@ -176,9 +197,8 @@ fileRouter.delete('/batch/permanent', async (req: AuthRequest, res, next) => {
         if (file.provider === 's3') {
           await deleteS3Object(file)
         } else {
-          const auth = await getAuthedGoogleClient(file.connectedAccount)
-          const drive = google.drive({ version: 'v3', auth })
-          await drive.files.delete({ fileId: file.providerFileId })
+          // External (full_drive) files go to the Google trash; app files keep the permanent delete.
+          await removeGoogleDriveItem(file.connectedAccount, file.providerFileId, file.isExternal)
         }
         deletedIds.push(file.id)
         syncedAccountIds.add(file.connectedAccountId)
@@ -246,7 +266,7 @@ fileRouter.post('/sync-google', async (req: AuthRequest, res, next) => {
     })
 
     const results = []
-    for (const account of accounts) results.push(await syncGoogleAppFolderFiles(account.id, req.user!.id))
+    for (const account of accounts) results.push(await syncGoogleAccount(account.id, req.user!.id))
 
     return res.json({
       status: 'ok',
@@ -273,7 +293,8 @@ fileRouter.patch('/:id', async (req: AuthRequest, res, next) => {
     const fileId = String(req.params.id)
     const file = await prisma.file.findFirstOrThrow({ where: { id: fileId, userId: req.user!.id }, include: { connectedAccount: true } })
     const drive = file.provider === 's3' ? null : google.drive({ version: 'v3', auth: await getAuthedGoogleClient(file.connectedAccount) })
-    if (body.folderId) await prisma.folder.findFirstOrThrow({ where: { id: body.folderId, userId: req.user!.id, deletedAt: null } })
+    const conflict = await findCrossScopeMoveConflict(req.user!.id, [file], body.folderId)
+    if (conflict) return res.status(400).json(conflict)
     if (body.name && drive) await drive.files.update({ fileId: file.providerFileId, requestBody: { name: body.name } })
     const updated = await prisma.file.update({ where: { id: file.id }, data: { ...(body.name ? { name: body.name } : {}), ...(body.folderId !== undefined ? { folderId: body.folderId } : {}) }, include: { connectedAccount: { select: { id: true, email: true, provider: true } }, folder: { select: { id: true, name: true } } } })
     await createAuditLog(req.user!.id, 'UPDATE_FILE', 'file', updated.id, { name: updated.name, updates: body })

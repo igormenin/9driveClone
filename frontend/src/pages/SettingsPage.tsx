@@ -8,7 +8,9 @@ import { apiFetch, formatBytes, API_URL } from '@/lib/api'
 import { getGravatarUrl } from '@/lib/gravatar'
 import { getStoredUser, getAccessToken, clearAuthSession } from '@/lib/auth'
 
-type ConnectedAccount = { id: string; provider: string; email: string; displayName?: string | null; status: string; storageAccount?: { totalBytes: string | null; usedBytes: string; availableBytes: string | null; lastSyncedAt: string | null } | null }
+type AccessScope = 'app_folder' | 'full_drive'
+type ConnectedAccount = { id: string; provider: string; email: string; displayName?: string | null; status: string; accessScope?: AccessScope; storageAccount?: { totalBytes: string | null; usedBytes: string; availableBytes: string | null; lastSyncedAt: string | null } | null }
+type AccessScopeChangeResult = { accessScope: AccessScope; hiddenFiles: number; hiddenFolders: number; restoredFiles: number; restoredFolders: number; syncRecommended: boolean }
 
 function providerLabel(provider: string) {
   if (provider === 's3') return 'S3 Storage'
@@ -36,6 +38,10 @@ export function SettingsPage() {
   const [syncingAccountId, setSyncingAccountId] = useState<string | null>(null)
   const [disconnectingAccountId, setDisconnectingAccountId] = useState<string | null>(null)
   const [accountToDisconnect, setAccountToDisconnect] = useState<ConnectedAccount | null>(null)
+  const [pendingScopeChange, setPendingScopeChange] = useState<{ account: ConnectedAccount; nextScope: AccessScope } | null>(null)
+  const [updatingScopeAccountId, setUpdatingScopeAccountId] = useState<string | null>(null)
+  const [syncingFilesAccountId, setSyncingFilesAccountId] = useState<string | null>(null)
+  const [syncRecommendedAccountId, setSyncRecommendedAccountId] = useState<string | null>(null)
   const [profileImageUrl, setProfileImageUrl] = useState('')
   const [avatarError, setAvatarError] = useState(false)
   const [selectedAccountId, setSelectedAccountId] = useState('')
@@ -316,6 +322,60 @@ export function SettingsPage() {
     }
   }
 
+  async function confirmScopeChange() {
+    if (!pendingScopeChange) return
+    const { account, nextScope } = pendingScopeChange
+    setUpdatingScopeAccountId(account.id)
+    setMessage('')
+    try {
+      const res = await apiFetch<AccessScopeChangeResult>(`/connected-accounts/${account.id}`, {
+        method: 'PATCH',
+        body: JSON.stringify({ accessScope: nextScope }),
+      })
+      setPendingScopeChange(null)
+      if (nextScope === 'app_folder') {
+        if (syncRecommendedAccountId === account.id) setSyncRecommendedAccountId(null)
+        setMessage(`Access scope set to App Folder (9drive). ${res.hiddenFiles} external file(s) and ${res.hiddenFolders} folder(s) were hidden (nothing was deleted).`)
+      } else if (res.syncRecommended) {
+        setSyncRecommendedAccountId(account.id)
+        setMessage(`Access scope set to Full Google Drive. ${res.restoredFiles} file(s) and ${res.restoredFolders} folder(s) restored. Please sync to verify if any file was removed in Google Drive.`)
+      } else {
+        setMessage('Access scope set to Full Google Drive. Click "Sync Files" to import your Drive files and folders.')
+      }
+      await load()
+      window.dispatchEvent(new Event('9drive:storage-changed'))
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : 'Failed to update access scope')
+    } finally {
+      setUpdatingScopeAccountId(null)
+    }
+  }
+
+  async function syncAccountFiles(accountId: string) {
+    setSyncingFilesAccountId(accountId)
+    setMessage('')
+    try {
+      const response = await apiFetch<{ results: { created: number; updated: number; deleted: number }[] }>('/files/sync-google', {
+        method: 'POST',
+        body: JSON.stringify({ connectedAccountId: accountId }),
+      })
+      let created = 0, updated = 0, deleted = 0
+      for (const item of response.results) {
+        created += item.created
+        updated += item.updated
+        deleted += item.deleted
+      }
+      if (syncRecommendedAccountId === accountId) setSyncRecommendedAccountId(null)
+      setMessage(`Google Drive files synced: ${created} added, ${updated} updated, ${deleted} removed.`)
+      await load()
+      window.dispatchEvent(new Event('9drive:storage-changed'))
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : 'Failed to sync Google Drive files')
+    } finally {
+      setSyncingFilesAccountId(null)
+    }
+  }
+
   async function disconnect() {
     if (!accountToDisconnect) return
     setDisconnectingAccountId(accountToDisconnect.id)
@@ -410,6 +470,49 @@ export function SettingsPage() {
                     <div className="rounded-xl bg-white dark:bg-slate-950 p-2 border border-slate-100 dark:border-slate-800"><p className="font-extrabold text-slate-950">{storageLimitLabel(selectedAccount)}</p><p className="mt-0.5 text-[10px] text-slate-500">Total</p></div>
                     <div className="rounded-xl bg-white dark:bg-slate-950 p-2 border border-slate-100 dark:border-slate-800"><p className="font-extrabold text-slate-950">{availableLabel(selectedAccount)}</p><p className="mt-0.5 text-[10px] text-slate-500">Free</p></div>
                   </div>
+                  {selectedAccount.provider === 'google_drive' ? (
+                    <div className="mt-3 rounded-xl bg-white dark:bg-slate-950 p-3 border border-slate-100 dark:border-slate-800 grid gap-2.5">
+                      <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+                        <div>
+                          <p className="text-xs font-bold text-slate-800 dark:text-slate-100">Drive Access Scope</p>
+                          <p className="text-[11px] text-slate-500">Choose whether 9Drive accesses only the dedicated <code>9drive</code> folder or all owned files in this Google Drive.</p>
+                        </div>
+                        <div className="flex items-center gap-2">
+                          <select
+                            className="h-9 rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 px-3 text-xs font-semibold focus:outline-none"
+                            value={selectedAccount.accessScope ?? 'app_folder'}
+                            disabled={updatingScopeAccountId === selectedAccount.id}
+                            onChange={(event) => {
+                              const nextScope = event.target.value as AccessScope
+                              if (nextScope === (selectedAccount.accessScope ?? 'app_folder')) return
+                              setPendingScopeChange({ account: selectedAccount, nextScope })
+                            }}
+                          >
+                            <option value="app_folder">App folder only (9drive - Recommended)</option>
+                            <option value="full_drive">Full Google Drive (All files)</option>
+                          </select>
+                          <Button
+                            size="sm"
+                            variant="outline"
+                            onClick={() => syncAccountFiles(selectedAccount.id)}
+                            disabled={syncingFilesAccountId === selectedAccount.id}
+                          >
+                            <RefreshCw className={syncingFilesAccountId === selectedAccount.id ? 'h-3.5 w-3.5 animate-spin' : 'h-3.5 w-3.5'} />
+                            {syncingFilesAccountId === selectedAccount.id ? 'Syncing Files...' : 'Sync Files'}
+                          </Button>
+                        </div>
+                      </div>
+                      {syncRecommendedAccountId === selectedAccount.id ? (
+                        <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between rounded-xl bg-amber-50 dark:bg-amber-950/40 border border-amber-200 dark:border-amber-800/60 p-2.5 text-xs text-amber-800 dark:text-amber-200">
+                          <span>Previously imported Drive files were restored. Run a sync to check if any file was removed directly in Google Drive.</span>
+                          <Button size="sm" onClick={() => syncAccountFiles(selectedAccount.id)} disabled={syncingFilesAccountId === selectedAccount.id}>
+                            <RefreshCw className={syncingFilesAccountId === selectedAccount.id ? 'h-3.5 w-3.5 animate-spin' : 'h-3.5 w-3.5'} />
+                            Sync Now
+                          </Button>
+                        </div>
+                      ) : null}
+                    </div>
+                  ) : null}
                 </div> : null}
               </>}
             </div>
@@ -621,6 +724,41 @@ export function SettingsPage() {
           <label className="flex items-center gap-2 text-sm font-semibold"><input type="checkbox" checked={s3Form.forcePathStyle} onChange={(event) => setS3Form({ ...s3Form, forcePathStyle: event.target.checked })} />Force path style</label>
           <div className="grid gap-3 sm:flex sm:justify-end"><Button variant="outline" type="button" onClick={() => setS3Open(false)} disabled={connectingS3}>Cancel</Button><Button type="submit" disabled={connectingS3}>{connectingS3 ? 'Connecting...' : 'Connect S3'}</Button></div>
         </form>
+      </DummyModal>
+      <DummyModal
+        open={Boolean(pendingScopeChange)}
+        title={pendingScopeChange?.nextScope === 'full_drive' ? 'Enable Full Google Drive access?' : 'Switch back to App Folder (9drive) only?'}
+        description={pendingScopeChange?.account.email ?? ''}
+        onClose={() => !updatingScopeAccountId && setPendingScopeChange(null)}
+      >
+        <div className="grid gap-4 text-sm text-slate-600 dark:text-slate-300">
+          {pendingScopeChange?.nextScope === 'full_drive' ? (
+            <div className="rounded-xl bg-slate-50 dark:bg-slate-900 p-4 grid gap-2 text-xs leading-relaxed">
+              <p className="font-semibold text-slate-900 dark:text-slate-100">What happens when enabling Full Google Drive:</p>
+              <ul className="list-disc pl-4 space-y-1">
+                <li>No re-authentication is needed.</li>
+                <li>Click <strong>Sync Files</strong> after confirming to import your existing Google Drive folders and files into 9Drive.</li>
+                <li>If external files were previously imported, they will be shown again immediately and you will be prompted to sync to verify any removals made in Google Drive.</li>
+                <li>No files or folders are ever deleted when switching modes.</li>
+              </ul>
+            </div>
+          ) : (
+            <div className="rounded-xl bg-slate-50 dark:bg-slate-900 p-4 grid gap-2 text-xs leading-relaxed">
+              <p className="font-semibold text-slate-900 dark:text-slate-100">What happens when switching to App Folder (9drive) only:</p>
+              <ul className="list-disc pl-4 space-y-1">
+                <li><strong>No files or folders are deleted</strong> in Google Drive or in the local database.</li>
+                <li>Files and folders outside <code>9drive</code> are simply hidden in 9Drive (and their public share links are paused while hidden).</li>
+                <li>Switching back to <strong>Full Google Drive</strong> at any time restores their visibility and share links.</li>
+              </ul>
+            </div>
+          )}
+          <div className="grid gap-3 sm:flex sm:justify-end">
+            <Button variant="outline" onClick={() => setPendingScopeChange(null)} disabled={Boolean(updatingScopeAccountId)}>Cancel</Button>
+            <Button onClick={confirmScopeChange} disabled={Boolean(updatingScopeAccountId)}>
+              {updatingScopeAccountId ? 'Saving...' : 'Confirm Change'}
+            </Button>
+          </div>
+        </div>
       </DummyModal>
       <DummyModal open={Boolean(accountToDisconnect)} title="Disconnect storage?" description="This will remove this storage account from 9Drive. Existing file records for this account may no longer be usable." onClose={() => setAccountToDisconnect(null)}>
         <div className="grid gap-4">

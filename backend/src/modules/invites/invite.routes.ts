@@ -13,7 +13,7 @@ type TargetRecord = { id: string; name: string; type: 'file' | 'folder'; mimeTyp
 
 async function assertTargetOwner(userId: string, targetType: string, targetId: string) {
   if (targetType === 'file') return prisma.file.findFirstOrThrow({ where: { id: targetId, userId, status: 'active' } })
-  return prisma.folder.findFirstOrThrow({ where: { id: targetId, userId, deletedAt: null } })
+  return prisma.folder.findFirstOrThrow({ where: { id: targetId, userId, deletedAt: null, hiddenAt: null } })
 }
 
 async function resolveTargets(invites: InviteRecord[]) {
@@ -21,7 +21,7 @@ async function resolveTargets(invites: InviteRecord[]) {
   const folderIds = invites.filter((invite) => invite.targetType === 'folder').map((invite) => invite.targetId)
   const [files, folders] = await Promise.all([
     prisma.file.findMany({ where: { id: { in: fileIds }, status: 'active' }, select: { id: true, name: true, mimeType: true, sizeBytes: true, folderId: true } }),
-    prisma.folder.findMany({ where: { id: { in: folderIds }, deletedAt: null }, select: { id: true, name: true } }),
+    prisma.folder.findMany({ where: { id: { in: folderIds }, deletedAt: null, hiddenAt: null }, select: { id: true, name: true } }),
   ])
   const targets = new Map<string, TargetRecord>()
   for (const file of files) targets.set(`file:${file.id}`, { id: file.id, name: file.name, type: 'file', mimeType: file.mimeType, sizeBytes: file.sizeBytes.toString(), folderId: file.folderId })

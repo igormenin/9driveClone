@@ -161,8 +161,11 @@ export async function handleUpload(req: AuthRequest, res: Response, next: NextFu
 
         const folderId = meta.folderId || null
         let targetAccountId: string | undefined = undefined
+        // Uploads into an external (full_drive) folder are external too; uploads without folder keep going to 9drive.
+        let folderIsExternal = false
         if (folderId) {
-          const folderRecord = await prisma.folder.findFirstOrThrow({ where: { id: folderId, userId: req.user!.id, deletedAt: null } })
+          const folderRecord = await prisma.folder.findFirstOrThrow({ where: { id: folderId, userId: req.user!.id, deletedAt: null, hiddenAt: null } })
+          folderIsExternal = folderRecord.isExternal
           if (folderRecord.connectedAccountId) {
             targetAccountId = folderRecord.connectedAccountId
           }
@@ -247,7 +250,7 @@ export async function handleUpload(req: AuthRequest, res: Response, next: NextFu
           return
         }
 
-        const file = account.provider === 's3' ? null : await prisma.file.create({ data: { userId: req.user!.id, connectedAccountId: account.id, folderId, provider: 'google_drive', providerFileId, name: uploadedName, mimeType: uploadedMimeType, sizeBytes: meta.sizeBytes } })
+        const file = account.provider === 's3' ? null : await prisma.file.create({ data: { userId: req.user!.id, connectedAccountId: account.id, folderId, provider: 'google_drive', providerFileId, name: uploadedName, mimeType: uploadedMimeType, sizeBytes: meta.sizeBytes, isExternal: folderIsExternal } })
         if (file) {
           logUpload('database file created', { sessionId: session.id, fileId: file.id, accountId: account.id })
           completed.push({ ...file, sizeBytes: file.sizeBytes.toString() })
@@ -323,7 +326,7 @@ uploadRouter.post('/resumable/init', requireAuth, async (req: AuthRequest, res, 
     const folderId = body.folderId || null
     let targetAccountId = body.targetAccountId
     if (folderId) {
-      const folderRecord = await prisma.folder.findFirstOrThrow({ where: { id: folderId, userId: req.user!.id, deletedAt: null } })
+      const folderRecord = await prisma.folder.findFirstOrThrow({ where: { id: folderId, userId: req.user!.id, deletedAt: null, hiddenAt: null } })
       if (folderRecord.connectedAccountId) {
         targetAccountId = folderRecord.connectedAccountId
       }
@@ -520,6 +523,7 @@ uploadRouter.put('/resumable/chunk/:id', requireAuth, async (req: AuthRequest, r
       })
 
       if (!existingFile) {
+        const sessionFolder = session.folderId ? await prisma.folder.findFirst({ where: { id: session.folderId, userId: req.user!.id }, select: { isExternal: true } }) : null
         existingFile = await prisma.file.create({
           data: {
             userId: req.user!.id,
@@ -529,7 +533,8 @@ uploadRouter.put('/resumable/chunk/:id', requireAuth, async (req: AuthRequest, r
             providerFileId: fileMeta.id,
             name: fileMeta.name || session.fileName,
             mimeType: fileMeta.mimeType || session.mimeType,
-            sizeBytes: totalBytes
+            sizeBytes: totalBytes,
+            isExternal: sessionFolder?.isExternal ?? false
           }
         })
       }
