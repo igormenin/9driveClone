@@ -183,9 +183,9 @@ systemRouter.post('/google-config', requireAuth, async (req, res, next) => {
       data: {
         userId: null,
         provider: 'google_drive',
-        clientIdEncrypted: encryptText(clientId),
-        clientSecretEncrypted: encryptText(finalSecret),
-        redirectUri: finalRedirectUri,
+        clientIdEncrypted: encryptText(clientId.trim()),
+        clientSecretEncrypted: encryptText(finalSecret.trim()),
+        redirectUri: finalRedirectUri.trim(),
         scopes,
         status: 'active'
       }
