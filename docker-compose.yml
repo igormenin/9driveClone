@@ -72,43 +72,49 @@ services:
           sleep infinity
         fi
         
-        if [ ! -f /root/.zrok/share_token ]; then
+        # 1. Ativar o ambiente uma única vez
+        if [ ! -f /root/.zrok/environment.json ]; then
           echo "================================================="
-          echo "Criando nova identidade e reservando URL..."
+          echo "Ativando ambiente Zrok..."
           zrok disable > /dev/null 2>&1 || true
-          zrok enable $$ZROK_ENABLE_TOKEN || { echo "Falha crítica no zrok enable!"; sleep infinity; }
-          
-          if [ -n "$$ZROK_UNIQUE_NAME" ]; then
-            echo "Tentando reservar URL com nome personalizado: $$ZROK_UNIQUE_NAME"
-            zrok reserve public http://frontend:80 --unique-name $$ZROK_UNIQUE_NAME > /tmp/reserve.log 2>&1
-          else
-            echo "Reservando URL publica fixa aleatoria para o frontend..."
-            zrok reserve public http://frontend:80 > /tmp/reserve.log 2>&1
-          fi
-          
-          cat /tmp/reserve.log
-          TOKEN=$$(cat /tmp/reserve.log | grep -o "token is '[^']*'" | cut -d"'" -f2)
-          if [ -n "$$TOKEN" ]; then
-            echo $$TOKEN > /root/.zrok/share_token
-            echo "Sucesso! URL Reservada."
-          else
-            echo "Falha ao extrair token de reserva."
-            sleep infinity
-          fi
+          zrok enable $$ZROK_ENABLE_TOKEN || { echo "Falha critica no zrok enable!"; sleep 10; exit 1; }
         fi
         
-        SHARE_TOKEN=$$(cat /root/.zrok/share_token)
+        # 2. Definir o token do share
+        if [ -n "$$ZROK_UNIQUE_NAME" ]; then
+          TARGET_TOKEN="$$ZROK_UNIQUE_NAME"
+          echo "================================================="
+          echo "Garantindo reserva para o nome: $$TARGET_TOKEN..."
+          zrok reserve public http://frontend:80 --unique-name "$$TARGET_TOKEN" > /tmp/reserve.log 2>&1 || true
+          cat /tmp/reserve.log
+        else
+          if [ ! -f /root/.zrok/share_token ]; then
+            echo "================================================="
+            echo "Reservando URL publica fixa aleatoria..."
+            zrok reserve public http://frontend:80 > /tmp/reserve.log 2>&1
+            cat /tmp/reserve.log
+            TOKEN=$$(grep -o "token is '[^']*'" /tmp/reserve.log | cut -d"'" -f2)
+            if [ -n "$$TOKEN" ]; then
+              echo "$$TOKEN" > /root/.zrok/share_token
+              echo "Sucesso! URL Reservada."
+            else
+              echo "Falha ao extrair token de reserva."
+              sleep 10
+              exit 1
+            fi
+          fi
+          TARGET_TOKEN=$$(cat /root/.zrok/share_token)
+        fi
+        
         echo "================================================="
-        echo "Iniciando túnel seguro Zrok na URL fixa..."
-        echo "Token do Share: $$SHARE_TOKEN"
+        echo "Iniciando túnel seguro Zrok para: $$TARGET_TOKEN"
+        echo "Alvo: http://frontend:80"
         echo "================================================="
-        zrok share reserved $$SHARE_TOKEN --headless || {
-          echo "ERRO: O zrok share falhou (ambiente corrompido ou token invalido)!"
-          echo "Deletando token para forcar recriacao automatica no proximo boot..."
-          rm -f /root/.zrok/share_token
+        while true; do
+          zrok share reserved "$$TARGET_TOKEN" --headless --override-endpoint http://frontend:80
+          echo "Zrok share desconectado. Reconectando em 5 segundos..."
           sleep 5
-          exit 1
-        }
+        done
 
 volumes:
   mysql_data:
