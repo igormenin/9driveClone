@@ -5,6 +5,7 @@ import fs from 'fs'
 import { requireAuth } from '../../middleware/auth.middleware.js'
 import { prisma } from '../../config/prisma.js'
 import { decryptText, encryptText } from '../../utils/crypto.js'
+import { getFrontendUrl } from '../../utils/url.js'
 import Busboy from 'busboy'
 
 export const systemRouter = Router()
@@ -107,7 +108,7 @@ systemRouter.get('/google-config', requireAuth, async (req, res, next) => {
       orderBy: { createdAt: 'desc' }
     })
 
-    const defaultRedirect = `${req.protocol}://${req.get('host')}/connected-accounts/google/callback`
+    const defaultRedirect = `${getFrontendUrl(req)}/connected-accounts/google/callback`
 
     if (!config) {
       return res.json({
@@ -143,7 +144,7 @@ systemRouter.post('/google-config', requireAuth, async (req, res, next) => {
       return res.status(400).json({ code: 'BAD_REQUEST', message: 'Client ID is required.' })
     }
 
-    const defaultRedirect = `${req.protocol}://${req.get('host')}/connected-accounts/google/callback`
+    const defaultRedirect = `${getFrontendUrl(req)}/connected-accounts/google/callback`
     const finalRedirectUri = redirectUri || defaultRedirect
 
     const scopes = [
