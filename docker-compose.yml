@@ -51,7 +51,6 @@ services:
 
   zrok:
     image: openziti/zrok
-    container_name: 9drive_zrok
     restart: unless-stopped
     user: root
     environment:
