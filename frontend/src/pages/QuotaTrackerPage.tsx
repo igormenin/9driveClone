@@ -175,7 +175,18 @@ export function QuotaTrackerPage() {
           {orderedAccounts().map((account, index) => <div key={account.id} className="flex flex-col gap-3 rounded-xl bg-slate-50 p-3 sm:flex-row sm:items-center sm:justify-between">
             <div className="flex items-center gap-3">
               <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-white text-blue-600"><ProviderIcon provider={account.provider} /></div>
-              <div><p className="font-semibold">{account.displayName || account.email}</p><p className="text-sm text-slate-500">{providerLabel(account.provider)} · {formatBytes(account.storageAccount?.usedBytes)} used · {availableLabel(account)} free</p></div>
+              <div>
+                <p className="font-semibold">
+                  {account.displayName && account.displayName !== account.email ? (
+                    <>
+                      {account.displayName} <span className="text-sm font-normal text-slate-500">({account.email})</span>
+                    </>
+                  ) : (
+                    account.displayName || account.email
+                  )}
+                </p>
+                <p className="text-sm text-slate-500">{providerLabel(account.provider)} · {formatBytes(account.storageAccount?.usedBytes)} used · {availableLabel(account)} free</p>
+              </div>
             </div>
             <div className="flex gap-2"><Button variant="outline" size="sm" onClick={() => moveAccount(account.id, -1)} disabled={index === 0}>Up</Button><Button variant="outline" size="sm" onClick={() => moveAccount(account.id, 1)} disabled={index === accounts.length - 1}>Down</Button></div>
           </div>)}
