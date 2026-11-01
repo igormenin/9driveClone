@@ -10,8 +10,8 @@ export const folderRouter = Router()
 folderRouter.use(requireAuth)
 
 const defaultFolderColor = '#3b82f6'
-const defaultFolderIconUrl = 'https://api.iconify.design/lucide:folder.svg'
-const iconUrlSchema = z.string().url().startsWith('https://api.iconify.design/lucide:').max(2048)
+const defaultFolderIconUrl = 'https://api.iconify.design/lucide/folder.svg'
+const iconUrlSchema = z.string().url().refine((url) => url.startsWith('https://api.iconify.design/lucide/') || url.startsWith('https://api.iconify.design/lucide:'), { message: 'Invalid icon URL' }).max(2048)
 const colorSchema = z.string().regex(/^(#[0-9a-fA-F]{6}|text-[a-z]+-[0-9]+)$/).max(64)
 
 const createSchema = z.object({
