@@ -2,12 +2,15 @@ import { useEffect, useState } from 'react'
 import { CheckCircle, Cloud, Database, Filter, Gauge, Link2, RefreshCw } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Card } from '@/components/ui/card'
+import { DummyModal } from '@/components/drive/DummyModal'
 import { PageHeader } from '@/components/drive/PageHeader'
 import { apiFetch, formatBytes } from '@/lib/api'
 import { cn } from '@/lib/utils'
 
 type StorageSummary = { totalBytes: string; usedBytes: string; availableBytes: string }
-type ConnectedAccount = { id: string; email: string; displayName?: string | null; provider: string; status: string; accessScope?: 'app_folder' | 'full_drive'; storageAccount?: { totalBytes: string | null; usedBytes: string; availableBytes: string | null; lastSyncedAt: string | null } | null }
+type AccessScope = 'app_folder' | 'full_drive'
+type ConnectedAccount = { id: string; email: string; displayName?: string | null; provider: string; status: string; accessScope?: AccessScope; storageAccount?: { totalBytes: string | null; usedBytes: string; availableBytes: string | null; lastSyncedAt: string | null } | null }
+type AccessScopeChangeResult = { accessScope: AccessScope; hiddenFiles: number; hiddenFolders: number; restoredFiles: number; restoredFolders: number; syncRecommended: boolean }
 type RoutingMode = 'most_available' | 'round_robin' | 'priority'
 type RoutingPolicy = { mode: RoutingMode; priorityAccountIds: string[]; roundRobinCursor: number }
 
@@ -51,6 +54,8 @@ export function QuotaTrackerPage() {
   const [autoRefresh, setAutoRefresh] = useState(false)
   const [refreshing, setRefreshing] = useState(false)
   const [syncingAccountId, setSyncingAccountId] = useState<string | null>(null)
+  const [pendingScopeChange, setPendingScopeChange] = useState<{ account: ConnectedAccount; nextScope: AccessScope } | null>(null)
+  const [updatingScopeAccountId, setUpdatingScopeAccountId] = useState<string | null>(null)
 
   async function load() {
     const [summaryData, accountData, policyData] = await Promise.all([
@@ -117,6 +122,33 @@ export function QuotaTrackerPage() {
       await load()
     } finally {
       setSyncingAccountId(null)
+    }
+  }
+
+  async function confirmScopeChange() {
+    if (!pendingScopeChange) return
+    const { account, nextScope } = pendingScopeChange
+    setUpdatingScopeAccountId(account.id)
+    setMessage('')
+    try {
+      const res = await apiFetch<AccessScopeChangeResult>(`/connected-accounts/${account.id}`, {
+        method: 'PATCH',
+        body: JSON.stringify({ accessScope: nextScope }),
+      })
+      setPendingScopeChange(null)
+      if (nextScope === 'app_folder') {
+        setMessage(`Access scope set to App Folder (9drive). ${res.hiddenFiles} external file(s) and ${res.hiddenFolders} folder(s) were hidden (nothing was deleted).`)
+      } else if (res.syncRecommended) {
+        setMessage(`Access scope set to Full Google Drive. ${res.restoredFiles} file(s) and ${res.restoredFolders} folder(s) restored. Go to Settings or All Files to sync files.`)
+      } else {
+        setMessage('Access scope set to Full Google Drive. You can now sync files in Settings or All Files.')
+      }
+      await load()
+      window.dispatchEvent(new Event('9drive:storage-changed'))
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : 'Failed to update access scope')
+    } finally {
+      setUpdatingScopeAccountId(null)
     }
   }
 
@@ -207,14 +239,38 @@ export function QuotaTrackerPage() {
           const color = statusColor(percent)
           return (
             <Card key={account.id} className="overflow-hidden p-5">
-              <div className="flex items-start justify-between gap-4">
-                <div className="flex items-center gap-3">
-                  <div className="flex h-11 w-11 items-center justify-center rounded-xl bg-blue-600 text-white"><ProviderIcon provider={account.provider} /></div>
-                  <div><div className="flex items-center gap-2"><h2 className="font-extrabold">{providerLabel(account.provider)}</h2>{account.provider === 'google_drive' ? <span className="rounded-full bg-slate-100 dark:bg-slate-800 px-2 py-0.5 text-[10px] font-semibold text-slate-600 dark:text-slate-300">{account.accessScope === 'full_drive' ? 'Full Drive' : 'App Folder'}</span> : null}</div><p className="text-sm text-slate-500">{account.email}</p></div>
+              <div className="flex items-center justify-between gap-3">
+                <div className="flex items-center gap-3 min-w-0">
+                  <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl bg-blue-600 text-white"><ProviderIcon provider={account.provider} /></div>
+                  <div className="min-w-0">
+                    <h2 className="font-extrabold truncate">{providerLabel(account.provider)}</h2>
+                    <p className="text-xs text-slate-500 truncate">{account.email}</p>
+                  </div>
                 </div>
-                <div className="flex gap-2"><Button variant="outline" size="icon" onClick={() => sync(account.id)} disabled={syncingAccountId === account.id}><RefreshCw className={syncingAccountId === account.id ? 'h-5 w-5 animate-spin' : 'h-5 w-5'} /></Button></div>
+
+                <div className="flex items-center gap-2 shrink-0">
+                  {account.provider === 'google_drive' ? (
+                    <select
+                      className="h-8 rounded-lg border border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-900 px-2 text-xs font-semibold text-slate-700 dark:text-slate-300 focus:outline-none focus:ring-1 focus:ring-blue-500"
+                      value={account.accessScope ?? 'app_folder'}
+                      disabled={updatingScopeAccountId === account.id}
+                      onChange={(event) => {
+                        const nextScope = event.target.value as AccessScope
+                        if (nextScope === (account.accessScope ?? 'app_folder')) return
+                        setPendingScopeChange({ account, nextScope })
+                      }}
+                    >
+                      <option value="app_folder">App Folder</option>
+                      <option value="full_drive">Full Drive</option>
+                    </select>
+                  ) : null}
+                  <Button variant="outline" size="icon" className="h-8 w-8" onClick={() => sync(account.id)} disabled={syncingAccountId === account.id}>
+                    <RefreshCw className={syncingAccountId === account.id ? 'h-4 w-4 animate-spin' : 'h-4 w-4'} />
+                  </Button>
+                </div>
               </div>
-              <div className="mt-6">
+
+              <div className="mt-5">
                 <div className="mb-2 flex items-center justify-between text-sm">
                   <span className="flex items-center gap-2 font-semibold"><span className={cn('h-3 w-3 rounded-full', color.split(' ')[0])} />storage</span>
                   <span className="font-bold">{percent}%</span>
@@ -226,6 +282,42 @@ export function QuotaTrackerPage() {
           )
         })}
       </div>
+
+      <DummyModal
+        open={Boolean(pendingScopeChange)}
+        title={pendingScopeChange?.nextScope === 'full_drive' ? 'Enable Full Google Drive access?' : 'Switch back to App Folder (9drive) only?'}
+        description={pendingScopeChange?.account.email ?? ''}
+        onClose={() => !updatingScopeAccountId && setPendingScopeChange(null)}
+      >
+        <div className="grid gap-4 text-sm text-slate-600 dark:text-slate-300">
+          {pendingScopeChange?.nextScope === 'full_drive' ? (
+            <div className="rounded-xl bg-slate-50 dark:bg-slate-900 p-4 grid gap-2 text-xs leading-relaxed">
+              <p className="font-semibold text-slate-900 dark:text-slate-100">What happens when enabling Full Google Drive:</p>
+              <ul className="list-disc pl-4 space-y-1">
+                <li>No re-authentication is needed.</li>
+                <li>Go to <strong>Settings</strong> or <strong>All Files</strong> to sync your existing Google Drive folders and files into 9Drive.</li>
+                <li>If external files were previously imported, they will be shown again immediately.</li>
+                <li>No files or folders are ever deleted when switching modes.</li>
+              </ul>
+            </div>
+          ) : (
+            <div className="rounded-xl bg-slate-50 dark:bg-slate-900 p-4 grid gap-2 text-xs leading-relaxed">
+              <p className="font-semibold text-slate-900 dark:text-slate-100">What happens when switching to App Folder (9drive) only:</p>
+              <ul className="list-disc pl-4 space-y-1">
+                <li><strong>No files or folders are deleted</strong> in Google Drive or in the local database.</li>
+                <li>Files and folders outside <code>9drive</code> are simply hidden in 9Drive (and their public share links are paused while hidden).</li>
+                <li>Switching back to <strong>Full Google Drive</strong> at any time restores their visibility and share links.</li>
+              </ul>
+            </div>
+          )}
+          <div className="grid gap-3 sm:flex sm:justify-end">
+            <Button variant="outline" onClick={() => setPendingScopeChange(null)} disabled={Boolean(updatingScopeAccountId)}>Cancel</Button>
+            <Button onClick={confirmScopeChange} disabled={Boolean(updatingScopeAccountId)}>
+              {updatingScopeAccountId ? 'Saving...' : 'Confirm Change'}
+            </Button>
+          </div>
+        </div>
+      </DummyModal>
     </>
   )
 }
