@@ -1,4 +1,4 @@
-import { MoreVertical } from 'lucide-react'
+import { Cloud, Database, MoreVertical } from 'lucide-react'
 import type { MouseEvent } from 'react'
 import { Card } from '@/components/ui/card'
 import { cn } from '@/lib/utils'
@@ -96,6 +96,12 @@ export function FolderGrid({
           <FolderVisual folder={folder} className={cn('transition group-hover:scale-110', cfg.icon)} />
           <h2 className={cn('line-clamp-2 text-center font-extrabold leading-tight', cfg.title)}>{folder.name}</h2>
           <p className={cn('line-clamp-1 text-center text-slate-500', cfg.sub)}>{folder.updated}</p>
+          {folder.accountEmail ? (
+            <span className="mt-1.5 inline-flex max-w-full items-center gap-1 rounded-full bg-slate-100 dark:bg-slate-800 px-2 py-0.5 text-[10px] font-semibold text-slate-600 dark:text-slate-300" title={folder.accountEmail}>
+              {folder.accountProvider === 's3' ? <Database className="h-3 w-3 shrink-0" /> : <Cloud className="h-3 w-3 shrink-0" />}
+              <span className="truncate">{folder.accountEmail}</span>
+            </span>
+          ) : null}
         </Card>
       ))}
     </div>

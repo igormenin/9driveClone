@@ -1,4 +1,4 @@
-import { MoreVertical } from 'lucide-react'
+import { Cloud, Database, MoreVertical } from 'lucide-react'
 import type { MouseEvent } from 'react'
 import { Card } from '@/components/ui/card'
 import { FileIcon } from '@/components/drive/FileIcon'
@@ -120,9 +120,23 @@ export function FileGrid({
             <div className={cn("min-w-0 text-center", cfg.mtCard)}>
               <h3 className={cn("font-extrabold text-slate-950 line-clamp-2", cfg.title)} title={file.name}>{file.name}</h3>
               <p className={cfg.date}>{file.date}</p>
-              <div className={cn("flex flex-wrap justify-center font-semibold text-slate-600", cfg.tagsShell)}>
-                <span className={cn("rounded-full bg-slate-100", cfg.tag)}>{file.size}</span>
-                <span className={cn("max-w-full truncate rounded-full bg-slate-100", cfg.tag)}>{file.access}</span>
+              <div className={cn("flex flex-wrap items-center justify-center gap-1 font-semibold text-slate-600 dark:text-slate-300", cfg.tagsShell)}>
+                <span className={cn("rounded-full bg-slate-100 dark:bg-slate-800", cfg.tag)}>{file.size}</span>
+                {file.accountEmail ? (
+                  <span
+                    className={cn("inline-flex max-w-full items-center gap-1 rounded-full bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-300", cfg.tag)}
+                    title={file.accountEmail}
+                  >
+                    {file.accountProvider?.toLowerCase().includes('s3') ? (
+                      <Database className="h-3 w-3 shrink-0" />
+                    ) : (
+                      <Cloud className="h-3 w-3 shrink-0" />
+                    )}
+                    <span className="truncate">{file.accountEmail}</span>
+                  </span>
+                ) : (
+                  <span className={cn("max-w-full truncate rounded-full bg-slate-100 dark:bg-slate-800", cfg.tag)}>{file.access}</span>
+                )}
               </div>
             </div>
           </Card>

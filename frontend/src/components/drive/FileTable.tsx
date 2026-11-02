@@ -1,4 +1,4 @@
-import { FolderOpen, MoreVertical, Star } from 'lucide-react'
+import { Cloud, Database, FolderOpen, MoreVertical, Star } from 'lucide-react'
 import { type MouseEvent, useState } from 'react'
 import { AvatarStack } from '@/components/drive/AvatarStack'
 import { FileIcon } from '@/components/drive/FileIcon'
@@ -32,6 +32,15 @@ export function FileTable({ files, mode = 'default', selectedFileIds = new Set<s
                     <span>{meta}</span>
                     <span>·</span>
                     <span>{file.size}</span>
+                    {file.accountEmail && (
+                      <>
+                        <span>·</span>
+                        <span className="inline-flex max-w-[140px] items-center gap-1 rounded-full bg-slate-100 dark:bg-slate-800 px-1.5 py-0.5 text-[10px] font-semibold text-slate-600 dark:text-slate-300" title={file.accountEmail}>
+                          {file.accountProvider?.toLowerCase().includes('s3') ? <Database className="h-2.5 w-2.5 shrink-0" /> : <Cloud className="h-2.5 w-2.5 shrink-0" />}
+                          <span className="truncate">{file.accountEmail}</span>
+                        </span>
+                      </>
+                    )}
                     {file.folderName && <><span>·</span><span className="flex items-center gap-0.5 text-blue-500"><FolderOpen className="h-3 w-3" />{file.folderName}</span></>}
                   </div>
                 </div>
@@ -89,7 +98,19 @@ export function FileTable({ files, mode = 'default', selectedFileIds = new Set<s
                 {mode === 'archived' ? <td className="py-2.5 text-slate-500">{file.archivedDate}</td> : null}
                 <td className="py-2.5 text-slate-500">{mode === 'archived' ? file.location : file.date}</td>
                 <td className="py-2.5 text-slate-500">{file.size}</td>
-                <td className="py-2.5 text-slate-500"><span className="flex items-center gap-2"><AvatarStack count={file.shared} />{file.access}</span></td>
+                <td className="py-2.5 text-slate-500">
+                  <span className="flex items-center gap-2">
+                    <AvatarStack count={file.shared} />
+                    {file.accountEmail ? (
+                      <span className="inline-flex max-w-[180px] items-center gap-1 rounded-full bg-slate-100 dark:bg-slate-800 px-2 py-0.5 text-xs font-semibold text-slate-600 dark:text-slate-300" title={file.accountEmail}>
+                        {file.accountProvider?.toLowerCase().includes('s3') ? <Database className="h-3 w-3 shrink-0" /> : <Cloud className="h-3 w-3 shrink-0" />}
+                        <span className="truncate">{file.accountEmail}</span>
+                      </span>
+                    ) : (
+                      file.access
+                    )}
+                  </span>
+                </td>
                 <td className="py-2.5 text-right">
                   <div className="flex items-center justify-end gap-1.5">
                     {/* Hover shortcuts */}

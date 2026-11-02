@@ -22,8 +22,8 @@ import type { FileItem, FolderItem } from '@/data/drive-data'
 import { useUpload } from '@/context/UploadContext'
 import { useDriveLayoutActions } from '@/layouts/DriveLayout'
 
-type BackendFile = { id: string; name: string; mimeType: string; sizeBytes: string; createdAt: string; folderId?: string | null; connectedAccount?: { email: string; provider: string }; folder?: { id: string; name: string } | null }
-type BackendFolder = { id: string; name: string; color: string; iconUrl?: string | null; parentId?: string | null; providerFolderId?: string | null; updatedAt: string }
+type BackendFile = { id: string; name: string; mimeType: string; sizeBytes: string; createdAt: string; folderId?: string | null; connectedAccountId?: string | null; connectedAccount?: { id?: string; email: string; provider: string; displayName?: string | null }; folder?: { id: string; name: string } | null }
+type BackendFolder = { id: string; name: string; color: string; iconUrl?: string | null; parentId?: string | null; providerFolderId?: string | null; updatedAt: string; connectedAccountId?: string | null; connectedAccount?: { id: string; email: string; provider: string; displayName?: string | null } | null }
 type ConnectedAccount = { id: string; provider: string; email: string; displayName?: string | null; status: string }
 
 const sizeActiveClasses: Record<FolderSizeScale, string> = {
@@ -56,11 +56,11 @@ function providerLabel(provider: string | undefined) {
 
 function mapFile(file: BackendFile): FileItem {
   const isZeroByteGoogleDoc = file.sizeBytes === '0' && file.mimeType.startsWith('application/vnd.google-apps.')
-  return { id: file.id, name: file.name, mimeType: file.mimeType, sizeBytes: file.sizeBytes, createdAt: file.createdAt, accountEmail: file.connectedAccount?.email, accountProvider: providerLabel(file.connectedAccount?.provider), date: formatDate(file.createdAt), size: isZeroByteGoogleDoc ? '—' : formatBytes(file.sizeBytes), access: file.connectedAccount?.email ?? providerLabel(file.connectedAccount?.provider), kind: mimeToKind(file.mimeType), shared: 1, folderId: file.folderId, folderName: file.folder?.name }
+  return { id: file.id, name: file.name, mimeType: file.mimeType, sizeBytes: file.sizeBytes, createdAt: file.createdAt, connectedAccountId: file.connectedAccount?.id || file.connectedAccountId || undefined, accountEmail: file.connectedAccount?.email, accountProvider: providerLabel(file.connectedAccount?.provider), date: formatDate(file.createdAt), size: isZeroByteGoogleDoc ? '—' : formatBytes(file.sizeBytes), access: file.connectedAccount?.email ?? providerLabel(file.connectedAccount?.provider), kind: mimeToKind(file.mimeType), shared: 1, folderId: file.folderId, folderName: file.folder?.name }
 }
 
 function mapFolder(folder: BackendFolder): FolderItem {
-  return { id: folder.id, name: folder.name, color: folder.color, iconUrl: folder.iconUrl, parentId: folder.parentId, providerFolderId: folder.providerFolderId, updated: `Updated ${formatDate(folder.updatedAt)}` }
+  return { id: folder.id, name: folder.name, color: folder.color, iconUrl: folder.iconUrl, parentId: folder.parentId, providerFolderId: folder.providerFolderId, updated: `Updated ${formatDate(folder.updatedAt)}`, connectedAccountId: folder.connectedAccountId || folder.connectedAccount?.id || undefined, accountEmail: folder.connectedAccount?.email, accountProvider: folder.connectedAccount?.provider }
 }
 
 
@@ -137,6 +137,25 @@ export function AllFilesPage() {
   const { setHeaderActions } = useDriveLayoutActions()
   const [connectedAccounts, setConnectedAccounts] = useState<ConnectedAccount[]>([])
   const [selectedTargetAccountId, setSelectedTargetAccountId] = useState('')
+  const [selectedMoveTargetAccountId, setSelectedMoveTargetAccountId] = useState('')
+  const [transferring, setTransferring] = useState(false)
+
+  function openMoveDialog(file?: FileItem | null) {
+    const targetFile = file || activeFile
+    if (targetFile) {
+      setActiveFile(targetFile)
+      setSelectedFolderId(targetFile.folderId || '')
+      setSelectedMoveTargetAccountId(targetFile.connectedAccountId || (connectedAccounts[0]?.id ?? ''))
+    } else if (selectedFileIds.size > 0) {
+      const firstSelected = files.find(f => selectedFileIds.has(f.id!))
+      setSelectedFolderId(firstSelected?.folderId || '')
+      setSelectedMoveTargetAccountId(firstSelected?.connectedAccountId || (connectedAccounts[0]?.id ?? ''))
+    } else {
+      setSelectedFolderId('')
+      setSelectedMoveTargetAccountId(connectedAccounts[0]?.id ?? '')
+    }
+    setMoveOpen(true)
+  }
 
   function changeFolderSize(scale: FolderSizeScale) {
     setFolderSizeScale(scale)
@@ -237,9 +256,7 @@ export function AllFilesPage() {
 
     function onOpenMoveShortcut(e: Event) {
       const file = (e as CustomEvent).detail as FileItem
-      setActiveFile(file)
-      setSelectedFolderId(file.folderId || '')
-      setMoveOpen(true)
+      openMoveDialog(file)
     }
 
     window.addEventListener('keydown', onKey)
@@ -477,14 +494,68 @@ export function AllFilesPage() {
 
   async function moveFile(event: FormEvent) {
     event.preventDefault()
-    const selectedIds = [...selectedFileIds]
-    if (selectedIds.length > 0) await apiFetch('/files/batch', { method: 'PATCH', body: JSON.stringify({ fileIds: selectedIds, folderId: selectedFolderId || null }) })
-    else if (activeFile?.id) await apiFetch(`/files/${activeFile.id}`, { method: 'PATCH', body: JSON.stringify({ folderId: selectedFolderId || null }) })
-    else return
-    setMoveOpen(false)
-    setSelectedFolderId('')
-    clearSelection()
-    await loadFiles()
+    const selectedIds = selectedFileIds.size > 0 ? Array.from(selectedFileIds) : (activeFile?.id ? [activeFile.id] : [])
+    if (selectedIds.length === 0) return
+
+    const targetFiles = files.filter(f => selectedIds.includes(f.id!))
+    const isTransfer = Boolean(
+      selectedMoveTargetAccountId &&
+      targetFiles.some(f => f.connectedAccountId && f.connectedAccountId !== selectedMoveTargetAccountId)
+    )
+
+    if (isTransfer) {
+      setTransferring(true)
+      setMessage('')
+      try {
+        const result = await apiFetch<{ message: string; transferredCount: number; errors?: string[] }>('/files/transfer', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            fileIds: selectedIds,
+            targetAccountId: selectedMoveTargetAccountId,
+            targetFolderId: selectedFolderId || null
+          })
+        })
+        setMessage(result.message || `Successfully transferred ${result.transferredCount} file(s).`)
+        if (result.errors && result.errors.length > 0) {
+          setMessage(`Transferred with warnings: ${result.errors.join(', ')}`)
+        }
+        setMoveOpen(false)
+        setSelectedFolderId('')
+        clearSelection()
+        await loadAll()
+        window.dispatchEvent(new Event('9drive:storage-changed'))
+      } catch (err: any) {
+        setMessage(err instanceof Error ? err.message : 'Failed to transfer files')
+      } finally {
+        setTransferring(false)
+      }
+      return
+    }
+
+    setLoading(true)
+    setMessage('')
+    try {
+      if (selectedIds.length > 1) {
+        await apiFetch('/files/batch', {
+          method: 'PATCH',
+          body: JSON.stringify({ fileIds: selectedIds, folderId: selectedFolderId || null })
+        })
+      } else if (selectedIds.length === 1) {
+        await apiFetch(`/files/${selectedIds[0]}`, {
+          method: 'PATCH',
+          body: JSON.stringify({ folderId: selectedFolderId || null })
+        })
+      }
+      setMoveOpen(false)
+      setSelectedFolderId('')
+      clearSelection()
+      await loadFiles()
+    } catch (err: any) {
+      setMessage(err instanceof Error ? err.message : 'Failed to move files')
+    } finally {
+      setLoading(false)
+    }
   }
 
   async function deleteFile() {
@@ -713,7 +784,7 @@ export function AllFilesPage() {
         <FolderGrid items={folders} sizeScale={folderSizeScale} onFolderMenu={openFolderMenu} onFolderOpen={openFolder} onDropItem={handleDropItem} />
       </> : null}
       <div className="mt-4 flex flex-col gap-2 sm:mt-5 sm:flex-row sm:items-center sm:justify-between">
-        <div className="flex flex-wrap items-center gap-3"><Button variant="soft" className="hidden sm:inline-flex"><Archive className="h-4 w-4" />Recents</Button><Button variant="soft" className="hidden sm:inline-flex"><Star className="h-4 w-4" />Starred</Button>{selectedFileIds.size > 0 ? <div className="flex w-full flex-col gap-3 rounded-2xl border border-orange-500/20 bg-orange-500/10 p-3 sm:w-auto sm:flex-row sm:items-center sm:border-0 sm:bg-transparent sm:p-0"><span className="text-sm font-extrabold text-slate-700">{selectedFileIds.size} selected</span><div className="grid grid-cols-4 gap-2 sm:flex sm:gap-3"><Button className="w-full" variant="outline" onClick={downloadBatchAsZip}><Download className="h-4 w-4" />ZIP</Button><Button className="w-full" variant="outline" onClick={() => setMoveOpen(true)}><FolderInput className="h-4 w-4" />Move</Button><Button className="w-full" variant="danger" onClick={() => setDeleteOpen(true)}><Trash2 className="h-4 w-4" />Delete</Button><Button className="w-full" variant="ghost" onClick={clearSelection}>Clear</Button></div></div> : null}</div>
+        <div className="flex flex-wrap items-center gap-3"><Button variant="soft" className="hidden sm:inline-flex"><Archive className="h-4 w-4" />Recents</Button><Button variant="soft" className="hidden sm:inline-flex"><Star className="h-4 w-4" />Starred</Button>{selectedFileIds.size > 0 ? <div className="flex w-full flex-col gap-3 rounded-2xl border border-orange-500/20 bg-orange-500/10 p-3 sm:w-auto sm:flex-row sm:items-center sm:border-0 sm:bg-transparent sm:p-0"><span className="text-sm font-extrabold text-slate-700">{selectedFileIds.size} selected</span><div className="grid grid-cols-4 gap-2 sm:flex sm:gap-3"><Button className="w-full" variant="outline" onClick={downloadBatchAsZip}><Download className="h-4 w-4" />ZIP</Button><Button className="w-full" variant="outline" onClick={() => openMoveDialog()}><FolderInput className="h-4 w-4" />Move / Transfer</Button><Button className="w-full" variant="danger" onClick={() => setDeleteOpen(true)}><Trash2 className="h-4 w-4" />Delete</Button><Button className="w-full" variant="ghost" onClick={clearSelection}>Clear</Button></div></div> : null}</div>
         <div className="flex gap-3"><Button variant={fileViewMode === 'grid' ? 'soft' : 'outline'} size="icon" aria-label="Show files as grid" aria-pressed={fileViewMode === 'grid'} onClick={() => changeFileViewMode('grid')}><LayoutGrid className="h-5 w-5" /></Button><Button variant={fileViewMode === 'list' ? 'soft' : 'outline'} size="icon" aria-label="Show files as list" aria-pressed={fileViewMode === 'list'} onClick={() => changeFileViewMode('list')}><List className="h-5 w-5" /></Button></div>
       </div>
       {cutFolder ? <p className="mt-3 rounded-xl bg-amber-50 p-3 text-sm font-semibold text-amber-700"><ClipboardPaste className="mr-2 inline h-4 w-4" />Cut folder: {cutFolder.name}. Press Ctrl+V or right-click empty area to paste here.</p> : null}
@@ -732,7 +803,7 @@ export function AllFilesPage() {
       )}
       </div>
       <EmptyAreaContextMenu x={emptyContextMenu.x} y={emptyContextMenu.y} open={emptyContextMenu.open} canPasteFolder={Boolean(cutFolder)} onClose={() => setEmptyContextMenu({ x: 0, y: 0, open: false })} onUpload={() => { setUploadOpen(true); setEmptyContextMenu({ x: 0, y: 0, open: false }) }} onCreateFolder={() => { setFolderOpen(true); setEmptyContextMenu({ x: 0, y: 0, open: false }) }} onPasteFolder={() => { pasteFolder().catch((error) => setMessage(error instanceof Error ? error.message : 'Failed to paste folder')); setEmptyContextMenu({ x: 0, y: 0, open: false }) }} />
-      <FileContextMenu x={contextMenu.x} y={contextMenu.y} file={contextMenu.file} onClose={() => setContextMenu({ x: 0, y: 0, file: null })} onView={viewFile} onDownload={downloadFile} onRename={() => { setRenameValue(activeFile?.name ?? ''); setRenameOpen(true); setContextMenu({ x: 0, y: 0, file: null }) }} onMove={() => { setMoveOpen(true); setContextMenu({ x: 0, y: 0, file: null }) }} onDetails={() => { setDetailOpen(true); setContextMenu({ x: 0, y: 0, file: null }) }} onShare={shareFile} onCopyLink={copyShareLinkDirect} onInvite={inviteToFile} onDelete={() => { setDeleteOpen(true); setContextMenu({ x: 0, y: 0, file: null }) }} />
+      <FileContextMenu x={contextMenu.x} y={contextMenu.y} file={contextMenu.file} onClose={() => setContextMenu({ x: 0, y: 0, file: null })} onView={viewFile} onDownload={downloadFile} onRename={() => { setRenameValue(activeFile?.name ?? ''); setRenameOpen(true); setContextMenu({ x: 0, y: 0, file: null }) }} onMove={() => { openMoveDialog(activeFile); setContextMenu({ x: 0, y: 0, file: null }) }} onDetails={() => { setDetailOpen(true); setContextMenu({ x: 0, y: 0, file: null }) }} onShare={shareFile} onCopyLink={copyShareLinkDirect} onInvite={inviteToFile} onDelete={() => { setDeleteOpen(true); setContextMenu({ x: 0, y: 0, file: null }) }} />
       <FolderContextMenu x={folderContextMenu.x} y={folderContextMenu.y} folder={folderContextMenu.folder} onClose={() => setFolderContextMenu({ x: 0, y: 0, folder: null })} onCut={() => cutSelectedFolder(activeFolderForMenu)} onRename={() => { setFolderRenameValue(activeFolderForMenu?.name ?? ''); setFolderRenameColor(normalizeFolderColor(activeFolderForMenu?.color)); setFolderRenameIconUrl(activeFolderForMenu?.iconUrl ?? defaultFolderIconUrl); setFolderRenameOpen(true); setFolderContextMenu({ x: 0, y: 0, folder: null }) }} onInvite={inviteToFolder} onCopyLink={copyFolderLink} onDelete={() => { setFolderDeleteOpen(true); setFolderContextMenu({ x: 0, y: 0, folder: null }) }} />
       <FileDetailsDrawer open={detailOpen} file={activeFile} onClose={() => setDetailOpen(false)} />
 
@@ -772,7 +843,45 @@ export function AllFilesPage() {
         </form>
       </DummyModal>
       <DummyModal open={renameOpen} title="Rename File" description={activeFile?.name ?? ''} onClose={() => setRenameOpen(false)}><form onSubmit={renameFile} className="grid gap-4"><Input value={renameValue} onChange={(event) => setRenameValue(event.target.value)} required /><div className="flex justify-end gap-3"><Button type="button" variant="outline" onClick={() => setRenameOpen(false)}>Cancel</Button><Button>Rename</Button></div></form></DummyModal>
-      <DummyModal open={moveOpen} title="Move to Folder" description={selectedFileIds.size > 0 ? `Move ${selectedFileIds.size} files` : activeFile?.name ?? ''} onClose={() => setMoveOpen(false)}><form onSubmit={moveFile} className="grid gap-4"><select className="h-11 rounded-xl border border-slate-200 px-3 text-sm" value={selectedFolderId} onChange={(event) => setSelectedFolderId(event.target.value)}><option value="">No folder</option>{allFolders.map((folder) => <option key={folder.id} value={folder.id}>{folder.name}</option>)}</select><div className="flex justify-end gap-3"><Button type="button" variant="outline" onClick={() => setMoveOpen(false)}>Cancel</Button><Button>Move</Button></div></form></DummyModal>
+      <DummyModal open={moveOpen} title={selectedMoveTargetAccountId && files.filter(f => (selectedFileIds.size > 0 ? Array.from(selectedFileIds) : (activeFile?.id ? [activeFile.id] : [])).includes(f.id!)).some(f => f.connectedAccountId && f.connectedAccountId !== selectedMoveTargetAccountId) ? "Transfer Files" : "Move to Folder"} description={selectedFileIds.size > 0 ? `${selectedFileIds.size} files selected` : activeFile?.name ?? ''} onClose={() => setMoveOpen(false)}>
+        <form onSubmit={moveFile} className="grid gap-4">
+          {connectedAccounts.length > 1 && (
+            <label className="grid gap-2 text-sm font-semibold">
+              Destination Storage Account
+              <select
+                className="h-11 rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 px-3 text-sm"
+                value={selectedMoveTargetAccountId}
+                onChange={(event) => setSelectedMoveTargetAccountId(event.target.value)}
+              >
+                {connectedAccounts.map((account) => (
+                  <option key={account.id} value={account.id}>
+                    {account.email || account.displayName || account.id} ({account.provider === 's3' ? 'S3' : 'Google Drive'})
+                  </option>
+                ))}
+              </select>
+            </label>
+          )}
+          {selectedMoveTargetAccountId && files.filter(f => (selectedFileIds.size > 0 ? Array.from(selectedFileIds) : (activeFile?.id ? [activeFile.id] : [])).includes(f.id!)).some(f => f.connectedAccountId && f.connectedAccountId !== selectedMoveTargetAccountId) && (
+            <div className="rounded-xl bg-amber-500/10 border border-amber-500/30 p-3 text-xs text-amber-700 dark:text-amber-300">
+              <p className="font-semibold mb-1">⚡ Cross-Account Transfer</p>
+              <p>Files will be copied to the selected account and removed from the current account. Native Google Docs cannot be transferred directly.</p>
+            </div>
+          )}
+          <label className="grid gap-2 text-sm font-semibold">
+            Destination Virtual Folder
+            <select className="h-11 rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 px-3 text-sm" value={selectedFolderId} onChange={(event) => setSelectedFolderId(event.target.value)}>
+              <option value="">No folder (Root)</option>
+              {allFolders.map((folder) => <option key={folder.id} value={folder.id}>{folder.name}</option>)}
+            </select>
+          </label>
+          <div className="flex justify-end gap-3 pt-2">
+            <Button type="button" variant="outline" onClick={() => setMoveOpen(false)}>Cancel</Button>
+            <Button disabled={loading || transferring}>
+              {transferring || loading ? 'Processing...' : (selectedMoveTargetAccountId && files.filter(f => (selectedFileIds.size > 0 ? Array.from(selectedFileIds) : (activeFile?.id ? [activeFile.id] : [])).includes(f.id!)).some(f => f.connectedAccountId && f.connectedAccountId !== selectedMoveTargetAccountId) ? 'Transfer' : 'Move')}
+            </Button>
+          </div>
+        </form>
+      </DummyModal>
       <DummyModal open={deleteOpen} title={selectedFileIds.size > 0 ? 'Delete Files' : 'Delete File'} description={selectedFileIds.size > 0 ? `Delete ${selectedFileIds.size} files from Google Drive?` : `Delete ${activeFile?.name ?? 'file'} from Google Drive?`} onClose={() => setDeleteOpen(false)}><div className="flex justify-end gap-3"><Button variant="outline" onClick={() => setDeleteOpen(false)}>Cancel</Button><Button variant="danger" onClick={deleteFile}>Delete</Button></div></DummyModal>
       <DummyModal open={shareOpen} title="Share Link" description={activeFile?.name ?? ''} onClose={() => setShareOpen(false)}>
         <div className="grid gap-4">

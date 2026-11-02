@@ -8,6 +8,7 @@ import { hashToken, randomToken } from '../../utils/crypto.js'
 import { getAuthedGoogleClient, isFullDriveAccount, removeGoogleDriveItem, syncGoogleAccount, syncGoogleQuota } from '../google/google.service.js'
 import { deleteS3Object, syncS3Quota, createS3Client, getS3ConfigForAccount } from '../s3/s3.service.js'
 import { streamProviderFile } from './stream-file.js'
+import { moveGoogleFileParent, transferFiles, TransferError } from './transfer.service.js'
 import { googleDownloadExportMimeTypes, normalizeHeaders, withExtension } from './stream-google-file.js'
 import { GetObjectCommand } from '@aws-sdk/client-s3'
 import { Readable } from 'node:stream'
@@ -91,7 +92,7 @@ fileRouter.get('/', async (req: AuthRequest, res, next) => {
     const files = await prisma.file.findMany({
       where,
       include: {
-        connectedAccount: { select: { id: true, email: true, provider: true } },
+        connectedAccount: { select: { id: true, email: true, provider: true, displayName: true } },
         folder: { select: { id: true, name: true } }
       },
       orderBy: { createdAt: 'desc' }
@@ -111,6 +112,9 @@ fileRouter.patch('/batch', async (req: AuthRequest, res, next) => {
     const conflict = await findCrossScopeMoveConflict(req.user!.id, filesToMove, body.folderId)
     if (conflict) return res.status(400).json(conflict)
     const result = await prisma.file.updateMany({ where: { id: { in: body.fileIds }, userId: req.user!.id, status: 'active' }, data: { folderId: body.folderId ?? null } })
+    // Mirror the move in Google Drive (same account only, best-effort).
+    const movedFiles = await prisma.file.findMany({ where: { id: { in: body.fileIds }, userId: req.user!.id, status: 'active' }, include: { connectedAccount: true } })
+    for (const movedFile of movedFiles) await moveGoogleFileParent(movedFile, body.folderId ?? null)
     await createAuditLog(req.user!.id, 'MOVE_FILES', 'file', undefined, { count: result.count, folderId: body.folderId })
     return res.json({ status: 'ok', moved: result.count })
   } catch (error) {
@@ -257,6 +261,21 @@ fileRouter.get('/shared-links', async (req: AuthRequest, res, next) => {
   }
 })
 
+// Transfers files to another connected account (content streamed source -> target, source removed only after success).
+fileRouter.post('/transfer', async (req: AuthRequest, res, next) => {
+  try {
+    const body = batchFileSchema.extend({ targetAccountId: z.string().min(1), targetFolderId: z.string().nullable().optional() }).parse(req.body)
+    const result = await transferFiles(req.user!.id, body.fileIds, body.targetAccountId, body.targetFolderId ?? null)
+    if (result.transferred.length === 0 && result.failed.length > 0) {
+      return res.status(400).json({ code: result.failed[0].code, message: result.failed[0].message, ...result })
+    }
+    return res.json({ status: 'ok', ...result })
+  } catch (error) {
+    if (error instanceof TransferError) return res.status(error.status).json({ code: error.code, message: error.message })
+    return next(error)
+  }
+})
+
 fileRouter.post('/sync-google', async (req: AuthRequest, res, next) => {
   try {
     const body = z.object({ connectedAccountId: z.string().min(1).optional() }).parse(req.body ?? {})
@@ -296,6 +315,7 @@ fileRouter.patch('/:id', async (req: AuthRequest, res, next) => {
     const conflict = await findCrossScopeMoveConflict(req.user!.id, [file], body.folderId)
     if (conflict) return res.status(400).json(conflict)
     if (body.name && drive) await drive.files.update({ fileId: file.providerFileId, requestBody: { name: body.name } })
+    if (body.folderId !== undefined && body.folderId !== file.folderId) await moveGoogleFileParent(file, body.folderId)
     const updated = await prisma.file.update({ where: { id: file.id }, data: { ...(body.name ? { name: body.name } : {}), ...(body.folderId !== undefined ? { folderId: body.folderId } : {}) }, include: { connectedAccount: { select: { id: true, email: true, provider: true } }, folder: { select: { id: true, name: true } } } })
     await createAuditLog(req.user!.id, 'UPDATE_FILE', 'file', updated.id, { name: updated.name, updates: body })
     return res.json({ file: { ...updated, sizeBytes: updated.sizeBytes.toString() } })

@@ -21,9 +21,13 @@ const createSchema = z.object({
   parentId: z.string().nullable().optional(),
 })
 
-function serializeFolder(folder: { id: string; name: string; color: string; iconUrl?: string | null; parentId?: string | null; providerFolderId?: string | null; createdAt: Date; updatedAt: Date }) {
-  return { ...folder, providerFolderId: folder.providerFolderId ?? null, createdAt: folder.createdAt.toISOString(), updatedAt: folder.updatedAt.toISOString() }
+type FolderAccountInfo = { id: string; email: string; provider: string; displayName: string | null } | null
+
+function serializeFolder(folder: { id: string; name: string; color: string; iconUrl?: string | null; parentId?: string | null; providerFolderId?: string | null; connectedAccountId?: string | null; connectedAccount?: FolderAccountInfo; createdAt: Date; updatedAt: Date }) {
+  return { ...folder, providerFolderId: folder.providerFolderId ?? null, connectedAccountId: folder.connectedAccountId ?? null, connectedAccount: folder.connectedAccount ?? null, createdAt: folder.createdAt.toISOString(), updatedAt: folder.updatedAt.toISOString() }
 }
+
+const folderSelect = { id: true, name: true, color: true, iconUrl: true, parentId: true, providerFolderId: true, connectedAccountId: true, connectedAccount: { select: { id: true, email: true, provider: true, displayName: true } }, createdAt: true, updatedAt: true } as const
 
 async function ensureProviderFolderIds(
   folders: Array<{ id: string; name: string; parentId: string | null; providerFolderId: string | null }>,
@@ -86,7 +90,7 @@ folderRouter.get('/', async (req: AuthRequest, res, next) => {
     const query = z.object({ parentId: z.string().nullable().optional(), all: z.string().optional() }).parse(req.query)
     const folders = await prisma.folder.findMany({
       where: { userId: req.user!.id, deletedAt: null, hiddenAt: null, ...(query.all === '1' ? {} : { parentId: query.parentId ?? null }) },
-      select: { id: true, name: true, color: true, iconUrl: true, parentId: true, providerFolderId: true, createdAt: true, updatedAt: true },
+      select: folderSelect,
       orderBy: { updatedAt: 'desc' },
     })
     await ensureProviderFolderIds(folders, req.user!.id)
@@ -101,7 +105,7 @@ folderRouter.get('/recent', async (req: AuthRequest, res, next) => {
     const limit = Math.min(Number(req.query.limit ?? 4), 4)
     const folders = await prisma.folder.findMany({
       where: { userId: req.user!.id, deletedAt: null, hiddenAt: null },
-      select: { id: true, name: true, color: true, iconUrl: true, parentId: true, providerFolderId: true, createdAt: true, updatedAt: true },
+      select: folderSelect,
       orderBy: { updatedAt: 'desc' },
       take: limit,
     })
@@ -165,7 +169,7 @@ folderRouter.post('/', async (req: AuthRequest, res, next) => {
         connectedAccountId: connectedAccount?.id ?? null,
         isExternal
       },
-      select: { id: true, name: true, color: true, iconUrl: true, parentId: true, providerFolderId: true, createdAt: true, updatedAt: true },
+      select: folderSelect,
     })
     await createAuditLog(req.user!.id, 'CREATE_FOLDER', 'folder', folder.id, { name: folder.name })
     return res.status(201).json({ folder: serializeFolder(folder) })
@@ -255,7 +259,7 @@ folderRouter.patch('/:id', async (req: AuthRequest, res, next) => {
     if (folder.count === 0) return res.status(404).json({ code: 'FOLDER_NOT_FOUND', message: 'Folder not found.' })
     const updated = await prisma.folder.findFirstOrThrow({
       where: { id: folderId, userId: req.user!.id },
-      select: { id: true, name: true, color: true, iconUrl: true, parentId: true, providerFolderId: true, createdAt: true, updatedAt: true },
+      select: folderSelect,
     })
     await createAuditLog(req.user!.id, 'UPDATE_FOLDER', 'folder', updated.id, { name: updated.name, updates: body })
     return res.json({ folder: serializeFolder(updated) })
