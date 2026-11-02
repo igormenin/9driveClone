@@ -83,7 +83,7 @@ export async function transferFiles(userId: string, fileIds: string[], targetAcc
   if (targetFolderId) {
     targetFolder = await prisma.folder.findFirst({ where: { id: targetFolderId, userId, deletedAt: null, hiddenAt: null } })
     if (!targetFolder) throw new TransferError('TARGET_FOLDER_NOT_FOUND', 'Target folder not found.', 404)
-    if (targetFolder.connectedAccountId !== target.id) throw new TransferError('TARGET_FOLDER_ACCOUNT_MISMATCH', 'Target folder belongs to a different storage account.')
+    if (targetFolder.connectedAccountId && targetFolder.connectedAccountId !== target.id) throw new TransferError('TARGET_FOLDER_ACCOUNT_MISMATCH', 'Target folder belongs to a different storage account.')
   }
 
   const files = await prisma.file.findMany({ where: { id: { in: fileIds }, userId, status: 'active' }, include: { connectedAccount: true } })

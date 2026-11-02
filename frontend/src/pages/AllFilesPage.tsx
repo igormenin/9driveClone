@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, type DragEvent, type FormEvent, type MouseEvent } from 'react'
 import { useSearchParams } from 'react-router-dom'
-import { Archive, CheckCircle, ClipboardPaste, Download, FolderInput, FolderPlus, LayoutGrid, List, RefreshCw, Star, Trash2, Upload, X } from 'lucide-react'
+import { AlertCircle, Archive, CheckCircle, CheckCircle2, CheckSquare, ClipboardPaste, Clock, Download, FolderInput, FolderPlus, LayoutGrid, List, Loader2, RefreshCw, Star, Trash2, Upload, X } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Card } from '@/components/ui/card'
 import { DummyModal } from '@/components/drive/DummyModal'
@@ -8,6 +8,7 @@ import { EmptyAreaContextMenu } from '@/components/drive/EmptyAreaContextMenu'
 import { FileContextMenu } from '@/components/drive/FileContextMenu'
 import { FileDetailsDrawer } from '@/components/drive/FileDetailsDrawer'
 import { FileGrid } from '@/components/drive/FileGrid'
+import { FileIcon } from '@/components/drive/FileIcon'
 import { FileTable } from '@/components/drive/FileTable'
 import { FolderContextMenu } from '@/components/drive/FolderContextMenu'
 import { FolderGrid, type FolderSizeScale } from '@/components/drive/FolderGrid'
@@ -25,6 +26,7 @@ import { useDriveLayoutActions } from '@/layouts/DriveLayout'
 type BackendFile = { id: string; name: string; mimeType: string; sizeBytes: string; createdAt: string; folderId?: string | null; connectedAccountId?: string | null; connectedAccount?: { id?: string; email: string; provider: string; displayName?: string | null }; folder?: { id: string; name: string } | null }
 type BackendFolder = { id: string; name: string; color: string; iconUrl?: string | null; parentId?: string | null; providerFolderId?: string | null; updatedAt: string; connectedAccountId?: string | null; connectedAccount?: { id: string; email: string; provider: string; displayName?: string | null } | null }
 type ConnectedAccount = { id: string; provider: string; email: string; displayName?: string | null; status: string }
+type FileTransferProgress = { id: string; name: string; sizeBytes?: string; size: string; kind: 'doc' | 'image' | 'video' | 'pdf'; status: 'pending' | 'transferring' | 'completed' | 'failed'; error?: string }
 
 const sizeActiveClasses: Record<FolderSizeScale, string> = {
   xs: 'bg-white text-slate-800 dark:bg-red-500/20 dark:text-red-300 dark:border-red-500/30 shadow-sm dark:shadow-none',
@@ -138,7 +140,10 @@ export function AllFilesPage() {
   const [connectedAccounts, setConnectedAccounts] = useState<ConnectedAccount[]>([])
   const [selectedTargetAccountId, setSelectedTargetAccountId] = useState('')
   const [selectedMoveTargetAccountId, setSelectedMoveTargetAccountId] = useState('')
-  const [transferring, setTransferring] = useState(false)
+  const [transferProgressOpen, setTransferProgressOpen] = useState(false)
+  const [transferQueue, setTransferQueue] = useState<FileTransferProgress[]>([])
+  const [isTransferringActive, setIsTransferringActive] = useState(false)
+  const [transferTargetAccountName, setTransferTargetAccountName] = useState('')
 
   function openMoveDialog(file?: FileItem | null) {
     const targetFile = file || activeFile
@@ -386,6 +391,11 @@ export function AllFilesPage() {
     setSelectedFileIds(allSelected ? new Set() : new Set(visibleIds))
   }
 
+  function selectAllVisibleFiles() {
+    const visibleIds = files.map((f) => f.id).filter(Boolean) as string[]
+    setSelectedFileIds(new Set(visibleIds))
+  }
+
   function clearSelection() {
     setSelectedFileIds(new Set())
   }
@@ -504,32 +514,54 @@ export function AllFilesPage() {
     )
 
     if (isTransfer) {
-      setTransferring(true)
-      setMessage('')
-      try {
-        const result = await apiFetch<{ message: string; transferredCount: number; errors?: string[] }>('/files/transfer', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            fileIds: selectedIds,
-            targetAccountId: selectedMoveTargetAccountId,
-            targetFolderId: selectedFolderId || null
+      setMoveOpen(false)
+
+      const queue: FileTransferProgress[] = targetFiles.map((f) => ({
+        id: f.id!,
+        name: f.name,
+        sizeBytes: f.sizeBytes,
+        size: f.size,
+        kind: f.kind,
+        status: 'pending'
+      }))
+      setTransferQueue(queue)
+
+      const targetAcc = connectedAccounts.find((a) => a.id === selectedMoveTargetAccountId)
+      setTransferTargetAccountName(targetAcc?.email || targetAcc?.displayName || (targetAcc?.provider === 's3' ? 'S3 Storage' : 'Google Drive'))
+
+      setTransferProgressOpen(true)
+      setIsTransferringActive(true)
+
+      for (let i = 0; i < queue.length; i++) {
+        const item = queue[i]
+        setTransferQueue((prev) => prev.map((q, idx) => idx === i ? { ...q, status: 'transferring' } : q))
+
+        try {
+          const res = await apiFetch<{ status: string; transferred: string[]; failed: Array<{ fileId: string; name?: string; message: string }> }>('/files/transfer', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              fileIds: [item.id],
+              targetAccountId: selectedMoveTargetAccountId,
+              targetFolderId: selectedFolderId || null
+            })
           })
-        })
-        setMessage(result.message || `Successfully transferred ${result.transferredCount} file(s).`)
-        if (result.errors && result.errors.length > 0) {
-          setMessage(`Transferred with warnings: ${result.errors.join(', ')}`)
+
+          if (res.transferred && res.transferred.includes(item.id)) {
+            setTransferQueue((prev) => prev.map((q, idx) => idx === i ? { ...q, status: 'completed' } : q))
+          } else {
+            const errMsg = res.failed?.[0]?.message || 'Falha na transferência'
+            setTransferQueue((prev) => prev.map((q, idx) => idx === i ? { ...q, status: 'failed', error: errMsg } : q))
+          }
+        } catch (err: any) {
+          setTransferQueue((prev) => prev.map((q, idx) => idx === i ? { ...q, status: 'failed', error: err.message || 'Erro de rede' } : q))
         }
-        setMoveOpen(false)
-        setSelectedFolderId('')
-        clearSelection()
-        await loadAll()
-        window.dispatchEvent(new Event('9drive:storage-changed'))
-      } catch (err: any) {
-        setMessage(err instanceof Error ? err.message : 'Failed to transfer files')
-      } finally {
-        setTransferring(false)
       }
+
+      setIsTransferringActive(false)
+      clearSelection()
+      await loadAll()
+      window.dispatchEvent(new Event('9drive:storage-changed'))
       return
     }
 
@@ -784,7 +816,42 @@ export function AllFilesPage() {
         <FolderGrid items={folders} sizeScale={folderSizeScale} onFolderMenu={openFolderMenu} onFolderOpen={openFolder} onDropItem={handleDropItem} />
       </> : null}
       <div className="mt-4 flex flex-col gap-2 sm:mt-5 sm:flex-row sm:items-center sm:justify-between">
-        <div className="flex flex-wrap items-center gap-3"><Button variant="soft" className="hidden sm:inline-flex"><Archive className="h-4 w-4" />Recents</Button><Button variant="soft" className="hidden sm:inline-flex"><Star className="h-4 w-4" />Starred</Button>{selectedFileIds.size > 0 ? <div className="flex w-full flex-col gap-3 rounded-2xl border border-orange-500/20 bg-orange-500/10 p-3 sm:w-auto sm:flex-row sm:items-center sm:border-0 sm:bg-transparent sm:p-0"><span className="text-sm font-extrabold text-slate-700">{selectedFileIds.size} selected</span><div className="grid grid-cols-4 gap-2 sm:flex sm:gap-3"><Button className="w-full" variant="outline" onClick={downloadBatchAsZip}><Download className="h-4 w-4" />ZIP</Button><Button className="w-full" variant="outline" onClick={() => openMoveDialog()}><FolderInput className="h-4 w-4" />Move / Transfer</Button><Button className="w-full" variant="danger" onClick={() => setDeleteOpen(true)}><Trash2 className="h-4 w-4" />Delete</Button><Button className="w-full" variant="ghost" onClick={clearSelection}>Clear</Button></div></div> : null}</div>
+        <div className="flex flex-wrap items-center gap-2">
+          <Button variant="soft" className="hidden sm:inline-flex"><Archive className="h-4 w-4" />Recents</Button>
+          <Button variant="soft" className="hidden sm:inline-flex"><Star className="h-4 w-4" />Starred</Button>
+          {selectedFileIds.size === 0 && files.length > 0 && (
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={selectAllVisibleFiles}
+              className="h-9 gap-1.5 text-xs font-bold text-slate-700 dark:text-slate-200"
+            >
+              <CheckSquare className="h-3.5 w-3.5 text-blue-600" />
+              Selecionar Todos ({files.length})
+            </Button>
+          )}
+          {selectedFileIds.size > 0 ? (
+            <div className="flex w-full flex-col gap-2 rounded-2xl border border-orange-500/20 bg-orange-500/10 p-2 sm:w-auto sm:flex-row sm:items-center sm:border-0 sm:bg-transparent sm:p-0">
+              <span className="text-sm font-extrabold text-slate-700 dark:text-slate-200 whitespace-nowrap">
+                {selectedFileIds.size} de {files.length} selecionado{selectedFileIds.size === 1 ? '' : 's'}
+              </span>
+              <div className="flex flex-wrap items-center gap-1.5">
+                {!allVisibleSelected && (
+                  <Button size="sm" variant="outline" onClick={selectAllVisibleFiles} className="h-8 gap-1 text-xs font-bold">
+                    <CheckSquare className="h-3 w-3 text-blue-600" />Selecionar Todos
+                  </Button>
+                )}
+                <Button size="sm" variant="outline" onClick={clearSelection} className="h-8 gap-1 text-xs font-bold text-slate-600 dark:text-slate-300 hover:text-red-600">
+                  <X className="h-3 w-3" />Remover Seleção
+                </Button>
+                <div className="h-4 w-px bg-slate-300 dark:bg-slate-700 hidden sm:block mx-1" />
+                <Button size="sm" variant="outline" onClick={downloadBatchAsZip}><Download className="h-3.5 w-3.5" />ZIP</Button>
+                <Button size="sm" variant="outline" onClick={() => openMoveDialog()}><FolderInput className="h-3.5 w-3.5" />Move / Transfer</Button>
+                <Button size="sm" variant="danger" onClick={() => setDeleteOpen(true)}><Trash2 className="h-3.5 w-3.5" />Delete</Button>
+              </div>
+            </div>
+          ) : null}
+        </div>
         <div className="flex gap-3"><Button variant={fileViewMode === 'grid' ? 'soft' : 'outline'} size="icon" aria-label="Show files as grid" aria-pressed={fileViewMode === 'grid'} onClick={() => changeFileViewMode('grid')}><LayoutGrid className="h-5 w-5" /></Button><Button variant={fileViewMode === 'list' ? 'soft' : 'outline'} size="icon" aria-label="Show files as list" aria-pressed={fileViewMode === 'list'} onClick={() => changeFileViewMode('list')}><List className="h-5 w-5" /></Button></div>
       </div>
       {cutFolder ? <p className="mt-3 rounded-xl bg-amber-50 p-3 text-sm font-semibold text-amber-700"><ClipboardPaste className="mr-2 inline h-4 w-4" />Cut folder: {cutFolder.name}. Press Ctrl+V or right-click empty area to paste here.</p> : null}
@@ -876,11 +943,101 @@ export function AllFilesPage() {
           </label>
           <div className="flex justify-end gap-3 pt-2">
             <Button type="button" variant="outline" onClick={() => setMoveOpen(false)}>Cancel</Button>
-            <Button disabled={loading || transferring}>
-              {transferring || loading ? 'Processing...' : (selectedMoveTargetAccountId && files.filter(f => (selectedFileIds.size > 0 ? Array.from(selectedFileIds) : (activeFile?.id ? [activeFile.id] : [])).includes(f.id!)).some(f => f.connectedAccountId && f.connectedAccountId !== selectedMoveTargetAccountId) ? 'Transfer' : 'Move')}
+            <Button disabled={loading}>
+              {loading ? 'Processing...' :  (selectedMoveTargetAccountId && files.filter(f => (selectedFileIds.size > 0 ? Array.from(selectedFileIds) : (activeFile?.id ? [activeFile.id] : [])).includes(f.id!)).some(f => f.connectedAccountId && f.connectedAccountId !== selectedMoveTargetAccountId) ? 'Transfer' : 'Move')}
             </Button>
           </div>
         </form>
+      </DummyModal>
+
+      <DummyModal
+        open={transferProgressOpen}
+        title="Progresso da Transferência"
+        description={`Transferindo para ${transferTargetAccountName}`}
+        onClose={() => {
+          if (!isTransferringActive) setTransferProgressOpen(false)
+        }}
+        className="sm:max-w-lg"
+      >
+        <div className="grid gap-4">
+          <div className="rounded-2xl border border-slate-200/80 dark:border-slate-800 bg-slate-50/80 dark:bg-slate-900/50 p-4">
+            <div className="flex items-center justify-between mb-2">
+              <span className="text-xs font-bold uppercase tracking-wider text-slate-500">
+                {isTransferringActive ? 'Transferindo arquivos...' : 'Transferência Concluída'}
+              </span>
+              <span className="text-xs font-extrabold text-blue-600 dark:text-blue-400">
+                {transferQueue.filter((f) => f.status === 'completed').length} de {transferQueue.length} concluído{transferQueue.filter((f) => f.status === 'completed').length === 1 ? '' : 's'}
+              </span>
+            </div>
+            <div className="h-2.5 w-full overflow-hidden rounded-full bg-slate-200 dark:bg-slate-800">
+              <div
+                className="h-full bg-gradient-to-r from-blue-600 to-indigo-600 transition-all duration-300 rounded-full"
+                style={{
+                  width: `${transferQueue.length > 0 ? (transferQueue.filter((f) => f.status === 'completed').length / transferQueue.length) * 100 : 0}%`
+                }}
+              />
+            </div>
+          </div>
+
+          <div className="max-h-72 overflow-y-auto space-y-2 pr-1">
+            {transferQueue.map((file) => (
+              <div
+                key={file.id}
+                className="flex items-center justify-between gap-3 rounded-xl border border-slate-200/60 dark:border-slate-800 bg-white dark:bg-slate-900 p-3 shadow-xs transition"
+              >
+                <div className="flex items-center gap-3 min-w-0 flex-1">
+                  <div className="shrink-0">
+                    <FileIcon kind={file.kind} className="h-6 w-6" />
+                  </div>
+                  <div className="min-w-0 flex-1">
+                    <p className="text-xs font-bold text-slate-900 dark:text-slate-100 truncate" title={file.name}>
+                      {file.name}
+                    </p>
+                    <p className="text-[10px] text-slate-500">
+                      {file.size}
+                      {file.error ? <span className="ml-1 text-red-500 font-semibold truncate block">· {file.error}</span> : null}
+                    </p>
+                  </div>
+                </div>
+
+                <div className="shrink-0">
+                  {file.status === 'pending' && (
+                    <span className="inline-flex items-center gap-1 rounded-full bg-slate-100 dark:bg-slate-800 px-2 py-0.5 text-[11px] font-semibold text-slate-500 dark:text-slate-400">
+                      <Clock className="h-3 w-3" /> Aguardando
+                    </span>
+                  )}
+                  {file.status === 'transferring' && (
+                    <span className="inline-flex items-center gap-1 rounded-full bg-blue-50 dark:bg-blue-950/40 border border-blue-200 dark:border-blue-800/50 px-2.5 py-0.5 text-[11px] font-bold text-blue-600 dark:text-blue-300 animate-pulse">
+                      <Loader2 className="h-3 w-3 animate-spin" /> Movendo...
+                    </span>
+                  )}
+                  {file.status === 'completed' && (
+                    <span className="inline-flex items-center gap-1 rounded-full bg-emerald-50 dark:bg-emerald-950/40 border border-emerald-200 dark:border-emerald-800/50 px-2.5 py-0.5 text-[11px] font-bold text-emerald-700 dark:text-emerald-300">
+                      <CheckCircle2 className="h-3.5 w-3.5 text-emerald-600" /> Concluído
+                    </span>
+                  )}
+                  {file.status === 'failed' && (
+                    <span className="inline-flex items-center gap-1 rounded-full bg-red-50 dark:bg-red-950/40 border border-red-200 dark:border-red-800/50 px-2.5 py-0.5 text-[11px] font-bold text-red-600 dark:text-red-300" title={file.error}>
+                      <AlertCircle className="h-3.5 w-3.5 text-red-600" /> Falhou
+                    </span>
+                  )}
+                </div>
+              </div>
+            ))}
+          </div>
+
+          <div className="flex items-center justify-between pt-2 border-t border-slate-100 dark:border-slate-800">
+            <span className="text-xs text-slate-500">
+              {isTransferringActive ? 'Por favor, não feche a janela durante a transferência.' : 'Processo finalizado.'}
+            </span>
+            <Button
+              disabled={isTransferringActive}
+              onClick={() => setTransferProgressOpen(false)}
+            >
+              {isTransferringActive ? 'Transferindo...' : 'Concluir'}
+            </Button>
+          </div>
+        </div>
       </DummyModal>
       <DummyModal open={deleteOpen} title={selectedFileIds.size > 0 ? 'Delete Files' : 'Delete File'} description={selectedFileIds.size > 0 ? `Delete ${selectedFileIds.size} files from Google Drive?` : `Delete ${activeFile?.name ?? 'file'} from Google Drive?`} onClose={() => setDeleteOpen(false)}><div className="flex justify-end gap-3"><Button variant="outline" onClick={() => setDeleteOpen(false)}>Cancel</Button><Button variant="danger" onClick={deleteFile}>Delete</Button></div></DummyModal>
       <DummyModal open={shareOpen} title="Share Link" description={activeFile?.name ?? ''} onClose={() => setShareOpen(false)}>
