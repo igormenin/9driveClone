@@ -2,6 +2,8 @@ FROM node:20-alpine AS base
 
 WORKDIR /app
 
+ENV NODE_OPTIONS="--dns-result-order=ipv4first"
+
 COPY package*.json ./
 COPY prisma ./prisma
 
