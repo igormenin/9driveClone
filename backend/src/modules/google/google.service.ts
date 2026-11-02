@@ -211,7 +211,11 @@ export async function removeGoogleDriveItem(account: ConnectedAccount, providerI
     await drive.files.update({ fileId: providerId, requestBody: { trashed: true } })
     return
   }
-  await drive.files.delete({ fileId: providerId })
+  try {
+    await drive.files.delete({ fileId: providerId })
+  } catch {
+    await drive.files.update({ fileId: providerId, requestBody: { trashed: true } })
+  }
 }
 
 export type AccessScopeChangeResult = {

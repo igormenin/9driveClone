@@ -144,6 +144,7 @@ export function AllFilesPage() {
   const [transferQueue, setTransferQueue] = useState<FileTransferProgress[]>([])
   const [isTransferringActive, setIsTransferringActive] = useState(false)
   const [transferTargetAccountName, setTransferTargetAccountName] = useState('')
+  const [deleteFromSource, setDeleteFromSource] = useState(true)
 
   function openMoveDialog(file?: FileItem | null) {
     const targetFile = file || activeFile
@@ -159,6 +160,7 @@ export function AllFilesPage() {
       setSelectedFolderId('')
       setSelectedMoveTargetAccountId(connectedAccounts[0]?.id ?? '')
     }
+    setDeleteFromSource(true)
     setMoveOpen(true)
   }
 
@@ -543,7 +545,8 @@ export function AllFilesPage() {
             body: JSON.stringify({
               fileIds: [item.id],
               targetAccountId: selectedMoveTargetAccountId,
-              targetFolderId: selectedFolderId || null
+              targetFolderId: selectedFolderId || null,
+              deleteFromSource
             })
           })
 
@@ -929,10 +932,30 @@ export function AllFilesPage() {
             </label>
           )}
           {selectedMoveTargetAccountId && files.filter(f => (selectedFileIds.size > 0 ? Array.from(selectedFileIds) : (activeFile?.id ? [activeFile.id] : [])).includes(f.id!)).some(f => f.connectedAccountId && f.connectedAccountId !== selectedMoveTargetAccountId) && (
-            <div className="rounded-xl bg-amber-500/10 border border-amber-500/30 p-3 text-xs text-amber-700 dark:text-amber-300">
-              <p className="font-semibold mb-1">⚡ Cross-Account Transfer</p>
-              <p>Files will be copied to the selected account and removed from the current account. Native Google Docs cannot be transferred directly.</p>
-            </div>
+            <>
+              <div className="rounded-xl bg-amber-500/10 border border-amber-500/30 p-3 text-xs text-amber-700 dark:text-amber-300">
+                <p className="font-semibold mb-1">⚡ Cross-Account Transfer</p>
+                <p>Files will be copied to the selected account. Native Google Docs cannot be transferred directly.</p>
+              </div>
+              <label className="flex items-start gap-3 p-3 rounded-xl border border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-900/50 cursor-pointer hover:bg-slate-100 dark:hover:bg-slate-800/60 transition">
+                <input
+                  type="checkbox"
+                  checked={deleteFromSource}
+                  onChange={(e) => setDeleteFromSource(e.target.checked)}
+                  className="mt-0.5 h-4 w-4 rounded accent-blue-600 shrink-0 cursor-pointer"
+                />
+                <div className="text-xs">
+                  <span className="font-bold text-slate-800 dark:text-slate-200 block">
+                    Remover arquivo da conta de origem após transferir
+                  </span>
+                  <span className="text-slate-500 dark:text-slate-400 block mt-0.5">
+                    {deleteFromSource
+                      ? 'O arquivo original será excluído da conta de origem após a cópia ser concluída com sucesso (Mover).'
+                      : 'Uma cópia será mantida na conta de origem (Duplicar/Copiar).'}
+                  </span>
+                </div>
+              </label>
+            </>
           )}
           <label className="grid gap-2 text-sm font-semibold">
             Destination Virtual Folder
@@ -953,7 +976,7 @@ export function AllFilesPage() {
       <DummyModal
         open={transferProgressOpen}
         title="Progresso da Transferência"
-        description={`Transferindo para ${transferTargetAccountName}`}
+        description={`${deleteFromSource ? 'Movendo para' : 'Copiando para'} ${transferTargetAccountName}`}
         onClose={() => {
           if (!isTransferringActive) setTransferProgressOpen(false)
         }}
@@ -1008,7 +1031,7 @@ export function AllFilesPage() {
                   )}
                   {file.status === 'transferring' && (
                     <span className="inline-flex items-center gap-1 rounded-full bg-blue-50 dark:bg-blue-950/40 border border-blue-200 dark:border-blue-800/50 px-2.5 py-0.5 text-[11px] font-bold text-blue-600 dark:text-blue-300 animate-pulse">
-                      <Loader2 className="h-3 w-3 animate-spin" /> Movendo...
+                      <Loader2 className="h-3 w-3 animate-spin" /> {deleteFromSource ? 'Movendo...' : 'Copiando...'}
                     </span>
                   )}
                   {file.status === 'completed' && (

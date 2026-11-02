@@ -264,8 +264,12 @@ fileRouter.get('/shared-links', async (req: AuthRequest, res, next) => {
 // Transfers files to another connected account (content streamed source -> target, source removed only after success).
 fileRouter.post('/transfer', async (req: AuthRequest, res, next) => {
   try {
-    const body = batchFileSchema.extend({ targetAccountId: z.string().min(1), targetFolderId: z.string().nullable().optional() }).parse(req.body)
-    const result = await transferFiles(req.user!.id, body.fileIds, body.targetAccountId, body.targetFolderId ?? null)
+    const body = batchFileSchema.extend({
+      targetAccountId: z.string().min(1),
+      targetFolderId: z.string().nullable().optional(),
+      deleteFromSource: z.boolean().optional().default(true)
+    }).parse(req.body)
+    const result = await transferFiles(req.user!.id, body.fileIds, body.targetAccountId, body.targetFolderId ?? null, body.deleteFromSource)
     if (result.transferred.length === 0 && result.failed.length > 0) {
       return res.status(400).json({ code: result.failed[0].code, message: result.failed[0].message, ...result })
     }

@@ -75,7 +75,7 @@ export type TransferResult = { transferred: string[]; failed: Array<{ fileId: st
  * Transfers files to another connected account. For each file: copy to target, update the DB row,
  * and only then remove from source. If anything fails before the DB update, the source is untouched.
  */
-export async function transferFiles(userId: string, fileIds: string[], targetAccountId: string, targetFolderId: string | null): Promise<TransferResult> {
+export async function transferFiles(userId: string, fileIds: string[], targetAccountId: string, targetFolderId: string | null, deleteFromSource = true): Promise<TransferResult> {
   const target = await prisma.connectedAccount.findFirst({ where: { id: targetAccountId, userId, status: 'connected' }, include: { storageAccount: true } })
   if (!target) throw new TransferError('TARGET_ACCOUNT_NOT_FOUND', 'Target storage account not found.', 404)
 
@@ -114,26 +114,44 @@ export async function transferFiles(userId: string, fileIds: string[], targetAcc
     try {
       const body = await openSourceStream(file)
       newProviderId = await uploadToTarget(file, target, targetFolder, body)
-      await prisma.file.update({
-        where: { id: file.id },
-        data: { connectedAccountId: target.id, provider: target.provider, providerFileId: newProviderId, folderId: targetFolder?.id ?? null, isExternal: targetFolder?.isExternal ?? false },
-      })
+      if (deleteFromSource) {
+        await prisma.file.update({
+          where: { id: file.id },
+          data: { connectedAccountId: target.id, provider: target.provider, providerFileId: newProviderId, folderId: targetFolder?.id ?? null, isExternal: targetFolder?.isExternal ?? false },
+        })
+      } else {
+        await prisma.file.create({
+          data: {
+            userId,
+            name: file.name,
+            mimeType: file.mimeType,
+            sizeBytes: file.sizeBytes,
+            connectedAccountId: target.id,
+            provider: target.provider,
+            providerFileId: newProviderId,
+            folderId: targetFolder?.id ?? null,
+            isExternal: targetFolder?.isExternal ?? false,
+            status: 'active',
+          },
+        })
+      }
     } catch (error) {
       if (newProviderId) await removeFromTarget(target, newProviderId)
       result.failed.push({ fileId: file.id, name: file.name, code: error instanceof TransferError ? error.code : 'TRANSFER_FAILED', message: error instanceof Error ? error.message : 'Transfer failed.' })
       continue
     }
 
-    // Copy is committed; removing the source is best-effort (a leftover copy never loses data).
-    try {
-      if (file.provider === 's3') await deleteS3Object(file)
-      else await removeGoogleDriveItem(file.connectedAccount, file.providerFileId, file.isExternal)
-    } catch (error) {
-      console.error('[transfer] source cleanup failed', { fileId: file.id, message: error instanceof Error ? error.message : 'unknown' })
+    if (deleteFromSource) {
+      try {
+        if (file.provider === 's3') await deleteS3Object(file)
+        else await removeGoogleDriveItem(file.connectedAccount, file.providerFileId, file.isExternal)
+      } catch (error) {
+        console.error('[transfer] source cleanup failed', { fileId: file.id, message: error instanceof Error ? error.message : 'unknown' })
+      }
+      sourceAccounts.set(file.connectedAccountId, file.connectedAccount)
     }
-    sourceAccounts.set(file.connectedAccountId, file.connectedAccount)
     result.transferred.push(file.id)
-    await createAuditLog(userId, 'TRANSFER_FILE', 'file', file.id, { name: file.name, from: file.connectedAccount.email, to: target.email, size: file.sizeBytes.toString() })
+    await createAuditLog(userId, deleteFromSource ? 'TRANSFER_FILE' : 'COPY_FILE', 'file', file.id, { name: file.name, from: file.connectedAccount.email, to: target.email, size: file.sizeBytes.toString(), deleteFromSource })
   }
 
   for (const account of sourceAccounts.values()) await syncQuota(account)
