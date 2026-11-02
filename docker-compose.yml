@@ -16,6 +16,7 @@ services:
       retries: 20
 
   backend:
+    image: multidrive_9drive_manager-backend:latest
     build:
       context: ./backend
     restart: unless-stopped
@@ -38,6 +39,7 @@ services:
       - "4000:4000"
 
   frontend:
+    image: multidrive_9drive_manager-frontend:latest
     build:
       context: ./frontend
       args:
