@@ -113,6 +113,7 @@ export function AllFilesPage() {
   const [activeFile, setActiveFile] = useState<FileItem | null>(null)
   const [activeFolderForMenu, setActiveFolderForMenu] = useState<FolderItem | null>(null)
   const [selectedFileIds, setSelectedFileIds] = useState<Set<string>>(new Set())
+  const [pageLoading, setPageLoading] = useState(true)
   const [cutFolder, setCutFolder] = useState<FolderItem | null>(null)
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number; file: FileItem | null }>({ x: 0, y: 0, file: null })
   const [folderContextMenu, setFolderContextMenu] = useState<{ x: number; y: number; folder: FolderItem | null }>({ x: 0, y: 0, folder: null })
@@ -206,7 +207,12 @@ export function AllFilesPage() {
   }
 
   async function loadAll() {
-    await Promise.all([loadFiles(), loadFolders()])
+    setPageLoading(true)
+    try {
+      await Promise.all([loadFiles(), loadFolders()])
+    } finally {
+      setPageLoading(false)
+    }
   }
 
   async function handleDropItem(fileId: string, targetFolderId: string) {
@@ -809,6 +815,13 @@ export function AllFilesPage() {
         </div>
       </div>
       {message ? <p className="mt-3 rounded-xl bg-blue-50 p-3 text-sm text-blue-700">{message}</p> : null}
+      {pageLoading ? (
+        <div className="flex flex-col items-center justify-center py-20 text-center">
+          <Loader2 className="h-8 w-8 animate-spin text-blue-600 dark:text-blue-400" />
+          <p className="mt-3 text-sm font-semibold text-slate-500">Carregando seus arquivos e pastas...</p>
+        </div>
+      ) : (
+        <>
       {!activeFolder && (recentFolders.length > 0 ? <FolderGrid items={recentFolders} mobileTwoColumns sizeScale={folderSizeScale} onFolderMenu={openFolderMenu} onFolderOpen={openFolder} onDropItem={handleDropItem} /> : <p className="mt-4 rounded-xl bg-slate-50 p-5 text-sm text-slate-500">No folders yet. Click New Folder to organize uploads.</p>)}
       {!activeFolder && moreFolders.length > 0 ? <>
         <h2 className="mt-4 font-extrabold text-slate-700">More Folders</h2>
@@ -870,6 +883,8 @@ export function AllFilesPage() {
             <FileTable files={files} selectedFileIds={selectedFileIds} allSelected={allVisibleSelected} onToggleFile={toggleFileSelection} onToggleAll={toggleAllVisibleFiles} onFileContextMenu={openContext} />
           )}
         </Card>
+      )}
+        </>
       )}
       </div>
       <EmptyAreaContextMenu x={emptyContextMenu.x} y={emptyContextMenu.y} open={emptyContextMenu.open} canPasteFolder={Boolean(cutFolder)} onClose={() => setEmptyContextMenu({ x: 0, y: 0, open: false })} onUpload={() => { setUploadOpen(true); setEmptyContextMenu({ x: 0, y: 0, open: false }) }} onCreateFolder={() => { setFolderOpen(true); setEmptyContextMenu({ x: 0, y: 0, open: false }) }} onPasteFolder={() => { pasteFolder().catch((error) => setMessage(error instanceof Error ? error.message : 'Failed to paste folder')); setEmptyContextMenu({ x: 0, y: 0, open: false }) }} />
